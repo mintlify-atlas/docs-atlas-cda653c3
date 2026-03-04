@@ -102,11 +102,7 @@ mode: "custom"
     </Step>
     
     <Step title="Initialize the database">
-      Run the migration script in your Supabase SQL Editor:
-      ```bash
-      # Edit scripts/seed.js with your phone_number_id
-      npm run seed
-      ```
+      Go to your Supabase Dashboard → SQL Editor and paste the contents of `supabase/migration.sql`, then execute it to create all tables and functions.
     </Step>
     
     <Step title="Start the server">
