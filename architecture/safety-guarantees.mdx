@@ -1,0 +1,302 @@
+---
+title: 'Concurrency & Safety Guarantees'
+description: 'How BookLine ensures race-condition-free booking with atomic operations'
+---
+
+## Safety Overview
+
+BookLine guarantees that no two patients can claim the same position number, even under high concurrency. This is achieved through a combination of **atomic database operations**, **idempotent webhook processing**, and **optimistic concurrency control**.
+
+| Guarantee | How |
+|-----------|-----|
+| **Concurrency-safe** | Atomic `$inc` via Supabase RPC for position assignment |
+| **Payment-safe** | Webhook is sole source of truth; status transitions are idempotent |
+| **Race-condition safe** | Optimistic concurrency on order status updates |
+| **Cap-safe** | Overflow detected post-increment; auto-rollback + refund |
+| **No double-booking** | Unique constraint on `bookings.order_id` |
+| **No duplicate webhooks** | Only processes orders with `status = pending` |
+
+## Atomic Position Assignment
+
+### Problem: Race Conditions
+
+Imagine two patients paying simultaneously for the same doctor:
+
+1. Patient A reads `current_count = 5`
+2. Patient B reads `current_count = 5` (before A writes)
+3. Patient A writes `current_count = 6`, gets position **#6**
+4. Patient B writes `current_count = 6`, gets position **#6** ❌
+
+Both patients receive the same position number — a critical failure.
+
+### Solution: PostgreSQL Atomic Increment
+
+BookLine uses a **server-side RPC function** that increments the counter in a single atomic transaction:
+
+```sql
+CREATE OR REPLACE FUNCTION increment_daily_count(
+  p_doctor_id UUID,
+  p_date DATE
+)
+RETURNS TABLE(new_count INTEGER, state_status TEXT)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_record doctor_daily_states%ROWTYPE;
+BEGIN
+  UPDATE doctor_daily_states
+  SET current_count = current_count + 1
+  WHERE doctor_id = p_doctor_id AND date = p_date
+  RETURNING * INTO v_record;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Daily state not found for doctor % on date %', p_doctor_id, p_date;
+  END IF;
+
+  new_count := v_record.current_count;
+  state_status := v_record.status;
+  RETURN NEXT;
+END;
+$$;
+```
+
+<Note>
+**Why it works:** The `UPDATE ... SET current_count = current_count + 1` operation is executed entirely within PostgreSQL. The database locks the row, reads the value, increments it, and writes it back **atomically**. No two transactions can interfere.
+</Note>
+
+### Usage in Code
+
+From `src/services/bookingService.js:24-28`:
+
+```javascript
+// 2. Atomic increment
+const result = await doctorService.incrementCount(doctorId, dateStr);
+if (!result) {
+    return { success: false, reason: 'INCREMENT_FAILED' };
+}
+
+const newCount = result.new_count;
+```
+
+## Overflow Protection
+
+### The Cap Exceeded Scenario
+
+What if a doctor has `max_patients = 30` and two patients pay when `current_count = 29`?
+
+1. Patient A → increment → `new_count = 30` ✅
+2. Patient B → increment → `new_count = 31` ⚠️
+
+Patient B exceeded the cap!
+
+### Rollback + Refund
+
+BookLine detects overflow **after** the atomic increment and immediately rolls back:
+
+```javascript
+// 3. Overflow check
+if (newCount > config.max_patients) {
+    // Rollback
+    await doctorService.decrementCount(doctorId, dateStr);
+    return { success: false, reason: 'CAP_EXCEEDED', refundRequired: true };
+}
+```
+
+The decrement function:
+
+```sql
+CREATE OR REPLACE FUNCTION decrement_daily_count(
+  p_doctor_id UUID,
+  p_date DATE
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  UPDATE doctor_daily_states
+  SET current_count = GREATEST(current_count - 1, 0)
+  WHERE doctor_id = p_doctor_id AND date = p_date;
+END;
+$$;
+```
+
+<Warning>
+**Important:** Decrement is **only** used for overflow rollback. BookLine does not support cancellations — once a booking is confirmed, the counter is never decremented.
+</Warning>
+
+The payment handler then triggers an automatic refund via Razorpay and notifies the patient.
+
+## Idempotent Webhook Processing
+
+### Problem: Duplicate Webhooks
+
+Razorpay may send the same `payment.captured` webhook multiple times (network retries, etc.). Without protection, this could create duplicate bookings.
+
+### Solution: Status-Gated Processing
+
+BookLine only processes orders in `pending` status:
+
+```javascript
+if (order.status !== 'pending') {
+    console.log('[PaymentHandler] Order already processed:', order.status);
+    return; // Idempotent
+}
+```
+
+The order status transition is **optimistic**:
+
+```javascript
+const { data: updated, error } = await supabase
+    .from('orders')
+    .update({ status: 'paid' })
+    .eq('id', order.id)
+    .eq('status', 'pending') // Only update if still pending
+    .select()
+    .single();
+
+if (!updated) {
+    // Another webhook already processed this
+    return;
+}
+```
+
+<Accordion title="What is optimistic concurrency?">
+Optimistic concurrency means we **assume** the order is still `pending` and attempt to update it. If another webhook already changed the status, the `WHERE status = 'pending'` clause causes the update to affect 0 rows, and we gracefully exit.
+
+This avoids the need for locks while still guaranteeing that only one webhook processes the payment.
+</Accordion>
+
+## No Double-Booking
+
+### Database Constraint
+
+The `bookings` table has a unique constraint on `order_id`:
+
+```sql
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_order_id
+  ON bookings (order_id);
+```
+
+If a duplicate booking creation is attempted (e.g., due to a race condition in application logic), PostgreSQL will reject it with error code `23505`.
+
+### Handling Duplicates
+
+From `src/services/bookingService.js:61-67`:
+
+```javascript
+if (error) {
+    // If booking creation fails (e.g., duplicate order_id), rollback
+    if (error.code === '23505') {
+        // Duplicate - booking already exists (idempotent)
+        await doctorService.decrementCount(doctorId, dateStr);
+        const existing = await this.findByOrderId(orderId);
+        if (existing) {
+            return { success: true, booking: existing, position: existing.position, duplicate: true };
+        }
+    }
+    // ...
+}
+```
+
+This ensures that even if duplicate bookings are attempted, the counter is corrected and the existing booking is returned.
+
+## Order Expiry
+
+### Automatic Cleanup
+
+Unpaid orders are automatically expired after **10 minutes** (configurable via `ORDER_EXPIRY_MINUTES`).
+
+The expiry job calls the `expire_stale_orders()` RPC function:
+
+```sql
+CREATE OR REPLACE FUNCTION expire_stale_orders()
+RETURNS INTEGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  affected INTEGER;
+BEGIN
+  UPDATE orders
+  SET status = 'expired'
+  WHERE status = 'pending' AND expires_at < NOW();
+
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  RETURN affected;
+END;
+$$;
+```
+
+<Note>
+Expired orders do **not** consume a position slot. The counter is only incremented **after** payment is confirmed, not at order creation.
+</Note>
+
+## Important Rules
+
+<Warning>
+### ⚠️ Critical Constraints
+
+1. **No cancellations** — Once paid, booking is final
+2. **No counter decrement** — Except during overflow rollback
+3. **Fee locked at order time** — Admin fee changes don't affect existing orders
+4. **Window validated at order creation** — Not at payment time
+5. **Each clinic is isolated** — Identified by WhatsApp `phone_number_id`
+</Warning>
+
+## Fee Locking
+
+When an order is created, the current `fee` from `doctor_configs` is copied into the order:
+
+```javascript
+const order = await orderService.create({
+    clinic_id: clinicId,
+    doctor_id: doctorId,
+    patient_phone,
+    amount: config.fee, // Locked at order creation time
+    date: dateStr,
+    expires_at: new Date(Date.now() + expiryMinutes * 60 * 1000)
+});
+```
+
+If an admin changes the doctor's fee while patients are in the payment flow, their orders are **unaffected** — they pay the fee that was shown to them.
+
+Similarly, when a booking is created, the fee is stored again:
+
+```javascript
+fee_at_booking_time: amount
+```
+
+This ensures a complete audit trail.
+
+## Platform Fee Split
+
+BookLine takes a **5% platform fee** on each booking, with the remaining **95% going to the clinic**.
+
+From `src/services/bookingService.js:40`:
+
+```javascript
+// 4. Calculate platform fee split (5% platform, 95% clinic)
+const { platformFee, clinicShare } = settlementService.calculateSplit(amount);
+```
+
+This is stored in the `bookings` table:
+
+```javascript
+platform_fee: platformFee,
+clinic_share: clinicShare,
+```
+
+<Accordion title="Why store the split at booking time?">
+Fee percentages may change in the future. By storing the exact split at booking time, settlements remain accurate even if the platform fee structure is updated later.
+</Accordion>
+
+## Summary
+
+✅ **Atomic operations** prevent race conditions  
+✅ **Idempotent webhooks** handle retries safely  
+✅ **Overflow detection** protects capacity limits  
+✅ **Unique constraints** prevent double-booking  
+✅ **Optimistic concurrency** avoids locks  
+✅ **Fee locking** ensures payment integrity  
+✅ **Automatic expiry** cleans up abandoned orders  
+
+BookLine's safety guarantees ensure that the system behaves correctly even under high load and network failures.

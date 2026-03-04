@@ -1,0 +1,776 @@
+---
+title: 'Core Services'
+description: 'Service layer documentation for BookLine business logic'
+---
+
+The service layer contains all the core business logic for the BookLine platform. Each service is a singleton class that handles a specific domain.
+
+## Booking Service
+
+**Location:** `src/services/bookingService.js`
+
+Handles booking creation only after confirmed payment with atomic position assignment.
+
+### processPayment
+
+Process successful payment, assign position atomically, and create booking.
+
+<ParamField path="order" type="object" required>
+  The order object containing:
+  - `doctor_id` (UUID): Doctor identifier
+  - `clinic_id` (UUID): Clinic identifier
+  - `date` (string): Booking date in YYYY-MM-DD format
+  - `patient_phone` (string): Patient phone number
+  - `amount` (integer): Fee in paise
+  - `id` (UUID): Order ID
+</ParamField>
+
+<ResponseField name="success" type="boolean">
+  Whether the booking was created successfully
+</ResponseField>
+
+<ResponseField name="booking" type="object">
+  The created booking object (if successful)
+</ResponseField>
+
+<ResponseField name="position" type="integer">
+  The assigned queue position
+</ResponseField>
+
+<ResponseField name="reason" type="string">
+  Error reason if `success` is false. Possible values:
+  - `DOCTOR_CONFIG_NOT_FOUND`
+  - `INCREMENT_FAILED`
+  - `CAP_EXCEEDED`
+  - `BOOKING_CREATION_FAILED`
+</ResponseField>
+
+<ResponseField name="refundRequired" type="boolean">
+  Whether a refund is needed (cap exceeded)
+</ResponseField>
+
+<CodeGroup>
+```javascript Usage Example
+const bookingService = require('./services/bookingService');
+
+// Process payment after Razorpay webhook
+const result = await bookingService.processPayment(order);
+
+if (result.success) {
+  console.log(`Booking created! Position: ${result.position}`);
+  // Send confirmation to patient
+} else if (result.reason === 'CAP_EXCEEDED' && result.refundRequired) {
+  // Initiate refund
+} else {
+  console.error(`Booking failed: ${result.reason}`);
+}
+```
+
+```javascript Response
+{
+  success: true,
+  booking: {
+    id: 'uuid',
+    clinic_id: 'uuid',
+    doctor_id: 'uuid',
+    date: '2026-03-04',
+    position: 15,
+    patient_phone: '919876543210',
+    fee_at_booking_time: 50000,
+    platform_fee: 2500,
+    clinic_share: 47500,
+    order_id: 'uuid'
+  },
+  position: 15
+}
+```
+</CodeGroup>
+
+### findByOrderId
+
+Find a booking by its associated order ID.
+
+<ParamField path="orderId" type="UUID" required>
+  The order ID
+</ParamField>
+
+<ResponseField name="return" type="object | null">
+  The booking object or null if not found
+</ResponseField>
+
+### listByDoctorDate
+
+Get all bookings for a doctor on a specific date (for admin dashboard).
+
+<ParamField path="doctorId" type="UUID" required>
+  The doctor's ID
+</ParamField>
+
+<ParamField path="dateStr" type="string" required>
+  Date in YYYY-MM-DD format
+</ParamField>
+
+<ResponseField name="return" type="array">
+  Array of booking objects with: `position`, `patient_phone`, `fee_at_booking_time`, `created_at`
+</ResponseField>
+
+### getPatientBookingsToday
+
+Get a patient's bookings for today at a specific clinic.
+
+<ParamField path="patientPhone" type="string" required>
+  Patient's phone number (E.164 format)
+</ParamField>
+
+<ParamField path="clinicId" type="UUID" required>
+  Clinic identifier
+</ParamField>
+
+<ParamField path="dateStr" type="string" required>
+  Date in YYYY-MM-DD format
+</ParamField>
+
+<ResponseField name="return" type="array">
+  Array of bookings with joined doctor information
+</ResponseField>
+
+### getPatientBookingsAllClinics
+
+Get a patient's bookings across ALL clinics (platform-level).
+
+<ParamField path="patientPhone" type="string" required>
+  Patient's phone number
+</ParamField>
+
+<ParamField path="dateStr" type="string" required>
+  Date in YYYY-MM-DD format
+</ParamField>
+
+<ResponseField name="return" type="array">
+  Array of bookings with joined doctor and clinic information
+</ResponseField>
+
+---
+
+## Order Service
+
+**Location:** `src/services/orderService.js`
+
+Handles order creation, lookup, status transitions, and expiry.
+
+### createOrder
+
+Create a Razorpay Payment Link and persist the Order record.
+
+<ParamField path="params" type="object" required>
+  Object containing:
+  - `clinicId` (UUID): Clinic identifier
+  - `doctorId` (UUID): Doctor identifier
+  - `patientPhone` (string): Patient phone number
+  - `amount` (integer): Amount in paise
+  - `dateStr` (string): Booking date (YYYY-MM-DD)
+</ParamField>
+
+<ResponseField name="order" type="object">
+  The created order record from database
+</ResponseField>
+
+<ResponseField name="paymentLink" type="object">
+  Razorpay payment link object with `short_url`, `id`, etc.
+</ResponseField>
+
+<CodeGroup>
+```javascript Usage
+const result = await orderService.createOrder({
+  clinicId: 'uuid',
+  doctorId: 'uuid',
+  patientPhone: '919876543210',
+  amount: 50000, // ₹500 in paise
+  dateStr: '2026-03-04'
+});
+
+const { order, paymentLink } = result;
+console.log(`Payment link: ${paymentLink.short_url}`);
+```
+</CodeGroup>
+
+### findByGatewayOrderId
+
+Find an order by its Razorpay payment link ID.
+
+<ParamField path="gatewayOrderId" type="string" required>
+  Razorpay payment link ID (e.g., `plink_xxx`)
+</ParamField>
+
+### findById
+
+Find an order by its internal UUID.
+
+<ParamField path="orderId" type="UUID" required>
+  Internal order ID
+</ParamField>
+
+### updateStatus
+
+Update order status with optimistic concurrency control.
+
+<ParamField path="orderId" type="UUID" required>
+  Order ID
+</ParamField>
+
+<ParamField path="fromStatus" type="string" required>
+  Current expected status (for optimistic locking)
+</ParamField>
+
+<ParamField path="toStatus" type="string" required>
+  Target status. One of: `pending`, `paid`, `expired`, `refunded`
+</ParamField>
+
+<ResponseField name="return" type="object | null">
+  Updated order object, or null if status didn't match
+</ResponseField>
+
+### findStaleOrders
+
+Find pending orders that have passed their expiry time (for notifications).
+
+<ResponseField name="return" type="array">
+  Array of expired pending orders
+</ResponseField>
+
+### expireStaleOrders
+
+Expire stale pending orders using the database RPC function.
+
+<ResponseField name="return" type="integer">
+  Number of orders expired
+</ResponseField>
+
+<CodeGroup>
+```javascript Cron Job Example
+// Run every 5 minutes
+const count = await orderService.expireStaleOrders();
+if (count > 0) {
+  console.log(`Expired ${count} stale orders`);
+}
+```
+</CodeGroup>
+
+### createUpiQr
+
+Create a Razorpay UPI QR Code for single-use payment.
+
+<ParamField path="params" type="object" required>
+  - `amount` (integer): Amount in paise
+  - `description` (string): QR code description
+  - `closeByUnix` (integer): Unix timestamp when QR expires
+  - `notes` (object): Metadata to attach to payment
+</ParamField>
+
+<ResponseField name="return" type="object | null">
+  Object with `id`, `image_url`, or null on failure
+</ResponseField>
+
+---
+
+## Doctor Service
+
+**Location:** `src/services/doctorService.js`
+
+Handles doctor queries, configuration, and daily state management.
+
+### listByClinic
+
+List all active doctors for a clinic.
+
+<ParamField path="clinicId" type="UUID" required>
+  Clinic identifier
+</ParamField>
+
+<ResponseField name="return" type="array">
+  Array of doctors with: `id`, `name`, `specialization`
+</ResponseField>
+
+### listTopActive
+
+List top 10 globally active doctors for WhatsApp discovery menu.
+
+<ResponseField name="return" type="array">
+  Array of doctors with joined clinic information
+</ResponseField>
+
+### getById
+
+Get a doctor by ID.
+
+<ParamField path="doctorId" type="UUID" required>
+  Doctor identifier
+</ParamField>
+
+### getConfig
+
+Get doctor configuration (fee, cap, booking window).
+
+<ParamField path="doctorId" type="UUID" required>
+  Doctor identifier
+</ParamField>
+
+<ResponseField name="return" type="object | null">
+  Configuration object with:
+  - `fee` (integer): Fee in paise
+  - `max_patients` (integer): Daily capacity
+  - `booking_start_time` (string): HH:MM format
+  - `booking_end_time` (string): HH:MM format
+  - `working_days` (string): e.g., "Mon,Tue,Wed" or "Everyday"
+</ResponseField>
+
+### updateConfig
+
+Update doctor configuration fields.
+
+<ParamField path="doctorId" type="UUID" required>
+  Doctor identifier
+</ParamField>
+
+<ParamField path="updates" type="object" required>
+  Object with fields to update (e.g., `{ fee: 60000, max_patients: 40 }`)
+</ParamField>
+
+### getOrCreateDailyState
+
+Get or create the doctor's daily state for a specific date.
+
+<ParamField path="doctorId" type="UUID" required>
+  Doctor identifier
+</ParamField>
+
+<ParamField path="dateStr" type="string" required>
+  Date in YYYY-MM-DD format
+</ParamField>
+
+<ResponseField name="return" type="object | null">
+  Daily state object with:
+  - `current_count` (integer): Number of bookings today
+  - `status` (string): `OPEN`, `PAUSED`, or `CLOSED`
+</ResponseField>
+
+### getDailyState
+
+Get the daily state without creating it.
+
+### updateDailyStatus
+
+Update the daily booking status.
+
+<ParamField path="doctorId" type="UUID" required>
+  Doctor identifier
+</ParamField>
+
+<ParamField path="dateStr" type="string" required>
+  Date in YYYY-MM-DD format
+</ParamField>
+
+<ParamField path="status" type="string" required>
+  One of: `OPEN`, `PAUSED`, `CLOSED`
+</ParamField>
+
+### incrementCount
+
+Atomically increment the current booking count (uses RPC).
+
+<ParamField path="doctorId" type="UUID" required>
+  Doctor identifier
+</ParamField>
+
+<ParamField path="dateStr" type="string" required>
+  Date in YYYY-MM-DD format
+</ParamField>
+
+<ResponseField name="return" type="object | null">
+  Object with:
+  - `new_count` (integer): Updated count
+  - `state_status` (string): Current status
+</ResponseField>
+
+### decrementCount
+
+Atomically decrement count (only for overflow rollback).
+
+---
+
+## Clinic Service
+
+**Location:** `src/services/clinicService.js`
+
+Handles clinic lookup. Supports single shared number (multi-clinic mode).
+
+### findByPhoneNumberId
+
+Find a clinic by its WhatsApp phone_number_id.
+
+<ParamField path="phoneNumberId" type="string" required>
+  Meta WhatsApp Business phone_number_id
+</ParamField>
+
+<ResponseField name="return" type="object | null">
+  Active clinic object or null
+</ResponseField>
+
+### listAllActive
+
+List all active clinics (for shared number multi-clinic selection).
+
+<ResponseField name="return" type="array">
+  Array of clinics with `id`, `name`
+</ResponseField>
+
+### findById
+
+Find a clinic by its UUID.
+
+### findByRegisteredBy
+
+Find the clinic registered by a specific phone number (for admin access).
+
+<ParamField path="phone" type="string" required>
+  Phone number that registered the clinic
+</ParamField>
+
+### isActive
+
+Check if a clinic is active.
+
+<ParamField path="clinicId" type="UUID" required>
+  Clinic identifier
+</ParamField>
+
+<ResponseField name="return" type="boolean">
+  True if clinic is active
+</ResponseField>
+
+---
+
+## Admin Service
+
+**Location:** `src/services/adminService.js`
+
+Manages admin login sessions via WhatsApp PIN (10-minute expiry).
+
+### login
+
+Validate PIN and create/update admin session.
+
+<ParamField path="phone" type="string" required>
+  Admin phone number
+</ParamField>
+
+<ParamField path="clinicId" type="UUID" required>
+  Clinic identifier
+</ParamField>
+
+<ParamField path="pin" type="string" required>
+  4-digit PIN
+</ParamField>
+
+<ResponseField name="return" type="object | null">
+  Session object if PIN is valid, null otherwise
+</ResponseField>
+
+### isAuthenticated
+
+Check if an admin session is valid and not expired.
+
+<ParamField path="phone" type="string" required>
+  Admin phone number
+</ParamField>
+
+<ParamField path="clinicId" type="UUID" required>
+  Clinic identifier
+</ParamField>
+
+<ResponseField name="return" type="boolean">
+  True if authenticated and session is active
+</ResponseField>
+
+### extendSession
+
+Extend session expiry by 10 minutes (called on each admin action).
+
+### logout
+
+Delete the admin session.
+
+---
+
+## Conversation Service
+
+**Location:** `src/services/conversationService.js`
+
+Tracks multi-step WhatsApp conversation flows. Supports single shared number mode where clinic_id is stored in state after selection.
+
+### getState
+
+Get conversation state by phone + clinic_id (per-clinic mode).
+
+<ParamField path="phone" type="string" required>
+  User phone number
+</ParamField>
+
+<ParamField path="clinicId" type="UUID" required>
+  Clinic identifier
+</ParamField>
+
+<ResponseField name="return" type="object">
+  Object with:
+  - `state` (string): Current conversation state
+  - `context` (object): State context data
+  - `clinic_id` (UUID): Clinic ID
+</ResponseField>
+
+### getStateByPhone
+
+Get state by phone + shared phone_number_id (single number mode).
+
+<ParamField path="phone" type="string" required>
+  User phone number
+</ParamField>
+
+<ParamField path="phoneNumberId" type="string" required>
+  Shared WhatsApp phone_number_id
+</ParamField>
+
+### setState
+
+Set conversation state by phone + clinic_id.
+
+<ParamField path="phone" type="string" required>
+  User phone number
+</ParamField>
+
+<ParamField path="clinicId" type="UUID" required>
+  Clinic identifier
+</ParamField>
+
+<ParamField path="state" type="string" required>
+  New state (e.g., `SELECTING_DOCTOR`, `AWAITING_PAYMENT`)
+</ParamField>
+
+<ParamField path="context" type="object" default="{}">
+  Context data to store
+</ParamField>
+
+### setStateByPhone
+
+Set state by phone + phone_number_id (single number mode, before clinic selected).
+
+### setClinic
+
+Save selected clinic for this user session.
+
+<ParamField path="phone" type="string" required>
+  User phone number
+</ParamField>
+
+<ParamField path="phoneNumberId" type="string" required>
+  Shared phone_number_id
+</ParamField>
+
+<ParamField path="clinicId" type="UUID" required>
+  Selected clinic ID
+</ParamField>
+
+### reset
+
+Reset conversation state to IDLE.
+
+### resetByPhone
+
+Reset by phone + phone_number_id (clears clinic selection too).
+
+---
+
+## Search Service
+
+**Location:** `src/services/searchService.js`
+
+Fuzzy search across clinics and doctors using Fuse.js. Uses a cached in-memory index that refreshes every 5 minutes.
+
+### search
+
+Search for clinics and doctors by free-text query.
+
+<ParamField path="query" type="string" required>
+  Search query (minimum 2 characters)
+</ParamField>
+
+<ResponseField name="return" type="object">
+  Object with:
+  - `clinics` (array): Top 5 clinic matches
+  - `doctors` (array): Top 5 doctor matches
+</ResponseField>
+
+<CodeGroup>
+```javascript Usage
+const results = await searchService.search('cardio');
+
+console.log(results);
+// {
+//   clinics: [
+//     { id: 'uuid', name: 'Cardio Care Clinic', score: 0.1 }
+//   ],
+//   doctors: [
+//     {
+//       id: 'uuid',
+//       name: 'Dr. Sharma',
+//       specialization: 'Cardiologist',
+//       clinicId: 'uuid',
+//       clinicName: 'City Hospital',
+//       score: 0.05
+//     }
+//   ]
+// }
+```
+</CodeGroup>
+
+### refreshIndex
+
+Build or rebuild the Fuse search indexes from the database.
+
+<Info>
+This is called automatically by `search()` if the cache is stale (> 5 minutes old).
+</Info>
+
+### invalidateCache
+
+Force a cache refresh (call after adding/removing clinics or doctors).
+
+---
+
+## Settlement Service
+
+**Location:** `src/services/settlementService.js`
+
+Tracks platform fees, clinic earnings, and settlement payouts.
+
+**Business Model:**
+- Patient pays ₹100 → BookLine Razorpay account
+- Platform fee: 5% = ₹5 (BookLine keeps)
+- Clinic share: 95% = ₹95 (settled to clinic via UPI/IMPS)
+- Razorpay fee: ~2% = ₹2 (deducted from BookLine's balance)
+- Net profit: ₹3 per ₹100
+
+### calculateSplit
+
+Calculate platform fee and clinic share for a given amount.
+
+<ParamField path="amountPaise" type="integer" required>
+  Total amount in paise
+</ParamField>
+
+<ResponseField name="return" type="object">
+  Object with:
+  - `platformFee` (integer): 5% of amount in paise
+  - `clinicShare` (integer): 95% of amount in paise
+</ResponseField>
+
+<CodeGroup>
+```javascript Example
+const split = settlementService.calculateSplit(50000);
+console.log(split);
+// { platformFee: 2500, clinicShare: 47500 }
+// ₹500 → ₹25 platform, ₹475 clinic
+```
+</CodeGroup>
+
+### getUnsettledEarnings
+
+Get unsettled earnings for a specific clinic.
+
+<ParamField path="clinicId" type="UUID" required>
+  Clinic identifier
+</ParamField>
+
+<ResponseField name="return" type="object | null">
+  Object with:
+  - `totalCollected` (integer): Total fees collected in paise
+  - `platformFee` (integer): Total platform fees
+  - `clinicShare` (integer): Total clinic share
+  - `bookingCount` (integer): Number of bookings
+</ResponseField>
+
+### getEarningsByDateRange
+
+Get earnings for a specific date range.
+
+<ParamField path="clinicId" type="UUID" required>
+  Clinic identifier
+</ParamField>
+
+<ParamField path="startDate" type="string" required>
+  Start date (YYYY-MM-DD)
+</ParamField>
+
+<ParamField path="endDate" type="string" required>
+  End date (YYYY-MM-DD)
+</ParamField>
+
+### getTodayEarnings
+
+Get today's earnings for a clinic.
+
+<ParamField path="clinicId" type="UUID" required>
+  Clinic identifier
+</ParamField>
+
+<ParamField path="todayStr" type="string" required>
+  Today's date (YYYY-MM-DD)
+</ParamField>
+
+### getPlatformEarnings
+
+Get ALL platform earnings across all clinics (for owner).
+
+<ParamField path="startDate" type="string" required>
+  Start date
+</ParamField>
+
+<ParamField path="endDate" type="string" required>
+  End date
+</ParamField>
+
+<ResponseField name="return" type="object | null">
+  Object with:
+  - `totalCollected` (integer)
+  - `platformFee` (integer)
+  - `clinicShare` (integer)
+  - `bookingCount` (integer)
+  - `byClinic` (object): Breakdown by clinic ID
+</ResponseField>
+
+### createSettlement
+
+Record a settlement when you pay a clinic.
+
+<ParamField path="params" type="object" required>
+  - `clinicId` (UUID)
+  - `periodStart` (string): Start date of settlement period
+  - `periodEnd` (string): End date of settlement period
+  - `totalCollected` (integer)
+  - `platformFee` (integer)
+  - `clinicShare` (integer)
+  - `bookingCount` (integer)
+  - `paymentRef` (string): Payment reference/UTR
+  - `notes` (string): Optional notes
+</ParamField>
+
+### getSettlementHistory
+
+Get settlement history for a clinic (last 10).
+
+<ParamField path="clinicId" type="UUID" required>
+  Clinic identifier
+</ParamField>
+
+<ResponseField name="return" type="array">
+  Array of settlement records
+</ResponseField>

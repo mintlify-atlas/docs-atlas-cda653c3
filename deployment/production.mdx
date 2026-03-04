@@ -1,0 +1,304 @@
+---
+title: Production Deployment
+description: Deploy BookLine to production on Render or similar platforms
+---
+
+This guide walks you through deploying BookLine to a production environment.
+
+## Prerequisites
+
+Before deploying, ensure you have:
+
+- A Supabase project with the BookLine schema
+- Meta WhatsApp Business API credentials
+- Razorpay account with API keys
+- A platform account (Render, Railway, or similar)
+
+## Deployment Options
+
+BookLine can be deployed to any Node.js hosting platform. This guide uses Render as an example.
+
+<Steps>
+  <Step title="Prepare Your Repository">
+    Ensure your code is pushed to a Git repository (GitHub, GitLab, or Bitbucket).
+
+    ```bash
+    git add .
+    git commit -m "Prepare for production deployment"
+    git push origin main
+    ```
+  </Step>
+
+  <Step title="Create a New Web Service">
+    1. Log in to [Render](https://render.com)
+    2. Click "New +" and select "Web Service"
+    3. Connect your Git repository
+    4. Configure the service:
+       - **Name**: `bookline-api` (or your preferred name)
+       - **Environment**: `Node`
+       - **Build Command**: `npm install`
+       - **Start Command**: `npm start`
+       - **Plan**: Select based on your needs (Free tier available)
+  </Step>
+
+  <Step title="Configure Environment Variables">
+    Add all required environment variables in the Render dashboard:
+
+    ### Server Configuration
+    ```bash
+    PORT=3000
+    NODE_ENV=production
+    ```
+
+    ### Supabase
+    ```bash
+    SUPABASE_URL=https://your-project.supabase.co
+    SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+    ```
+
+    ### WhatsApp Meta Cloud API
+    ```bash
+    WHATSAPP_VERIFY_TOKEN=your-webhook-verify-token
+    WHATSAPP_API_VERSION=v21.0
+    WHATSAPP_ACCESS_TOKEN=your-whatsapp-access-token
+    ```
+
+    ### Razorpay
+    ```bash
+    RAZORPAY_KEY_ID=rzp_live_xxxxxxxxxxxxx
+    RAZORPAY_KEY_SECRET=your-razorpay-key-secret
+    RAZORPAY_WEBHOOK_SECRET=your-razorpay-webhook-secret
+    ```
+
+    ### Optional Configuration
+    ```bash
+    ORDER_EXPIRY_MINUTES=10
+    OWNER_PHONE=919876543210
+    ```
+
+    <Warning>
+      Use **production** credentials for Razorpay (`rzp_live_*`) and ensure your WhatsApp Business number is verified.
+    </Warning>
+  </Step>
+
+  <Step title="Deploy the Service">
+    Click "Create Web Service" to start the deployment. Render will:
+    
+    1. Clone your repository
+    2. Install dependencies
+    3. Start the server
+    4. Provide a public URL (e.g., `https://bookline-api.onrender.com`)
+
+    Monitor the deployment logs for any errors.
+  </Step>
+
+  <Step title="Verify Deployment">
+    Test the health check endpoint:
+
+    ```bash
+    curl https://your-app.onrender.com/health
+    ```
+
+    Expected response:
+    ```json
+    {
+      "status": "ok",
+      "service": "BookLine",
+      "timestamp": "2026-03-04T10:30:00.000Z"
+    }
+    ```
+  </Step>
+</Steps>
+
+## Environment Variables Reference
+
+Here's a complete reference of all environment variables:
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `PORT` | No | `3000` | Server port |
+| `NODE_ENV` | No | `development` | Environment (use `production`) |
+| `SUPABASE_URL` | Yes | - | Your Supabase project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes | - | Supabase service role key (not anon key) |
+| `WHATSAPP_VERIFY_TOKEN` | Yes | - | Token for webhook verification |
+| `WHATSAPP_API_VERSION` | No | `v21.0` | Meta Graph API version |
+| `WHATSAPP_ACCESS_TOKEN` | Yes | - | WhatsApp Business API access token |
+| `RAZORPAY_KEY_ID` | Yes | - | Razorpay API key ID |
+| `RAZORPAY_KEY_SECRET` | Yes | - | Razorpay API secret |
+| `RAZORPAY_WEBHOOK_SECRET` | Yes | - | Razorpay webhook signature secret |
+| `ORDER_EXPIRY_MINUTES` | No | `20` | Minutes before pending orders expire |
+| `OWNER_PHONE` | No | - | Phone number for admin notifications |
+
+<Note>
+  The server validates required environment variables at startup. If any are missing, it will exit with an error message.
+</Note>
+
+## Configure Webhooks
+
+After deployment, configure external webhooks:
+
+### WhatsApp Webhook
+
+<Steps>
+  <Step title="Navigate to Meta Developer Console">
+    Go to your app in the [Meta for Developers](https://developers.facebook.com) console.
+  </Step>
+
+  <Step title="Configure Webhook URL">
+    Under WhatsApp > Configuration:
+    
+    - **Callback URL**: `https://your-app.onrender.com/webhook`
+    - **Verify Token**: Same as `WHATSAPP_VERIFY_TOKEN`
+  </Step>
+
+  <Step title="Subscribe to Events">
+    Subscribe to the `messages` webhook field.
+  </Step>
+</Steps>
+
+### Razorpay Webhook
+
+<Steps>
+  <Step title="Navigate to Razorpay Dashboard">
+    Go to Settings > Webhooks in your [Razorpay Dashboard](https://dashboard.razorpay.com).
+  </Step>
+
+  <Step title="Add Webhook">
+    - **URL**: `https://your-app.onrender.com/payment/webhook`
+    - **Secret**: Same as `RAZORPAY_WEBHOOK_SECRET`
+    - **Events**: Select `payment.captured`, `payment.failed`
+  </Step>
+</Steps>
+
+## Background Jobs
+
+BookLine automatically starts background jobs on server startup:
+
+### Order Expiry Job
+
+The expiry job runs every 2 minutes to:
+
+- Find pending orders older than `ORDER_EXPIRY_MINUTES`
+- Mark them as expired
+- Send WhatsApp notifications to patients
+
+```javascript
+// Automatically started in src/server.js:47
+const { startExpiryJob } = require('./jobs/expiryJob');
+startExpiryJob();
+```
+
+<Note>
+  The cron job runs in-process. For high-scale deployments, consider moving to a dedicated job queue (Bull, BullMQ).
+</Note>
+
+## SSL/HTTPS
+
+Render provides automatic SSL certificates for all deployed services. No additional configuration needed.
+
+<Warning>
+  Both WhatsApp and Razorpay webhooks **require** HTTPS. Do not use HTTP endpoints in production.
+</Warning>
+
+## Database Connection
+
+BookLine uses Supabase's connection pooler for production:
+
+```javascript
+// src/config/supabase.js
+const { createClient } = require('@supabase/supabase-js');
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+```
+
+<Note>
+  Supabase handles connection pooling automatically. No additional configuration required.
+</Note>
+
+## Scaling Considerations
+
+### Horizontal Scaling
+
+BookLine can run multiple instances, but consider:
+
+- **Cron jobs** will run on each instance (may send duplicate notifications)
+- Solution: Use a distributed job queue or run cron jobs on a single dedicated worker
+
+### Database Connections
+
+Supabase handles connection pooling. For direct Postgres connections, use:
+
+```bash
+SUPABASE_URL=https://your-project.supabase.co/db/pooler
+```
+
+## Alternative Platforms
+
+<Accordion title="Deploy to Railway">
+  1. Connect your GitHub repository
+  2. Railway auto-detects Node.js and uses `npm start`
+  3. Add environment variables in the Variables tab
+  4. Railway provides a public URL automatically
+</Accordion>
+
+<Accordion title="Deploy to Heroku">
+  ```bash
+  heroku create bookline-api
+  heroku config:set NODE_ENV=production
+  heroku config:set SUPABASE_URL=https://...
+  # ... set all other env vars
+  git push heroku main
+  ```
+</Accordion>
+
+<Accordion title="Deploy to DigitalOcean App Platform">
+  1. Create a new app from your GitHub repository
+  2. Set environment variables in the App Settings
+  3. Configure the run command: `npm start`
+  4. Deploy and access via the provided URL
+</Accordion>
+
+## Deployment Checklist
+
+Before going live:
+
+- [ ] All environment variables configured
+- [ ] Health check endpoint returns `200 OK`
+- [ ] WhatsApp webhook verified and subscribed
+- [ ] Razorpay webhook configured with production keys
+- [ ] Database migrations applied
+- [ ] Test booking flow end-to-end
+- [ ] Monitor logs for errors
+- [ ] Set up monitoring and alerts (see [Monitoring](/deployment/monitoring))
+
+## Troubleshooting
+
+### Server Won't Start
+
+```bash
+❌ Missing required env var: SUPABASE_URL
+```
+
+**Solution**: Ensure all required environment variables are set (see reference table above).
+
+### Webhook Verification Failed
+
+**Solution**: Ensure `WHATSAPP_VERIFY_TOKEN` matches exactly what you configured in Meta Developer Console.
+
+### Razorpay Signature Mismatch
+
+**Solution**: Verify `RAZORPAY_WEBHOOK_SECRET` matches the secret in your Razorpay dashboard.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Monitoring" icon="chart-line" href="/deployment/monitoring">
+    Set up monitoring and logging for production
+  </Card>
+  <Card title="Database" icon="database" href="/architecture/database-schema">
+    Review the database schema
+  </Card>
+</CardGroup>

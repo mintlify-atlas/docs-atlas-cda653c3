@@ -1,0 +1,546 @@
+---
+title: "Configuration Guide"
+description: "Complete reference for configuring BookLine"
+---
+
+This guide covers all configuration options for BookLine, from environment variables to database settings and runtime configuration.
+
+## Environment Configuration
+
+All environment variables are validated at startup in `src/config/env.js`. Missing required variables will prevent the server from starting.
+
+### Required Variables
+
+<ParamField path="PORT" type="number" default="3000">
+  Server port number
+</ParamField>
+
+<ParamField path="SUPABASE_URL" type="string" required>
+  Your Supabase project URL (e.g., `https://xxxxx.supabase.co`)
+</ParamField>
+
+<ParamField path="SUPABASE_SERVICE_ROLE_KEY" type="string" required>
+  Supabase service role key with full database access
+</ParamField>
+
+<ParamField path="WHATSAPP_VERIFY_TOKEN" type="string" required>
+  Token for WhatsApp webhook verification (you choose this value)
+</ParamField>
+
+<ParamField path="WHATSAPP_API_VERSION" type="string" default="v21.0">
+  Meta WhatsApp Cloud API version
+</ParamField>
+
+<ParamField path="RAZORPAY_KEY_ID" type="string" required>
+  Razorpay API key ID
+</ParamField>
+
+<ParamField path="RAZORPAY_KEY_SECRET" type="string" required>
+  Razorpay API key secret
+</ParamField>
+
+<ParamField path="RAZORPAY_WEBHOOK_SECRET" type="string" required>
+  Razorpay webhook secret for signature verification
+</ParamField>
+
+<ParamField path="ORDER_EXPIRY_MINUTES" type="number" default="10">
+  Minutes before unpaid orders automatically expire
+</ParamField>
+
+### Optional Variables
+
+<ParamField path="NODE_ENV" type="string" default="development">
+  Environment mode: `development`, `production`, or `test`
+</ParamField>
+
+<ParamField path="RENDER_EXTERNAL_URL" type="string">
+  External URL when deployed on Render (auto-set by Render)
+</ParamField>
+
+### Example .env File
+
+```bash
+# Server
+PORT=3000
+NODE_ENV=production
+
+# Database
+SUPABASE_URL=https://xxxxx.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+
+# WhatsApp
+WHATSAPP_VERIFY_TOKEN=your-secure-verify-token
+WHATSAPP_API_VERSION=v21.0
+
+# Razorpay
+RAZORPAY_KEY_ID=rzp_test_xxxxx
+RAZORPAY_KEY_SECRET=xxxxx
+RAZORPAY_WEBHOOK_SECRET=xxxxx
+
+# Orders
+ORDER_EXPIRY_MINUTES=10
+```
+
+## Database Configuration
+
+### Clinic Setup
+
+Each clinic in BookLine is identified by a unique WhatsApp `phone_number_id` from Meta. Configure clinics in the `clinics` table:
+
+```sql
+INSERT INTO clinics (
+  name,
+  phone_number_id,
+  waba_id,
+  access_token,
+  admin_pin,
+  timezone,
+  active
+) VALUES (
+  'City Medical Clinic',
+  '123456789012345',
+  'waba_id_from_meta',
+  'EAAxxxx...',  -- Permanent access token from Meta
+  'your-secure-pin',
+  'Asia/Kolkata',
+  true
+);
+```
+
+#### Clinic Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | TEXT | Clinic name (displayed to patients) |
+| `phone_number_id` | TEXT | Meta WhatsApp phone number ID (unique) |
+| `waba_id` | TEXT | WhatsApp Business Account ID |
+| `access_token` | TEXT | Permanent System User token from Meta |
+| `admin_pin` | TEXT | PIN for admin authentication |
+| `timezone` | TEXT | IANA timezone (e.g., `Asia/Kolkata`, `America/New_York`) |
+| `active` | BOOLEAN | Whether the clinic is accepting bookings |
+
+<Warning>
+The `phone_number_id` must match the WhatsApp Business Phone Number ID from your Meta app. This is how BookLine routes messages to the correct clinic.
+</Warning>
+
+### Doctor Setup
+
+Doctors belong to clinics and have both persistent configuration and daily runtime state.
+
+#### Add a Doctor
+
+```sql
+INSERT INTO doctors (clinic_id, name, active)
+VALUES (
+  '<clinic-uuid>',
+  'Dr. Sarah Johnson',
+  true
+);
+```
+
+#### Configure Doctor Settings
+
+```sql
+INSERT INTO doctor_configs (
+  doctor_id,
+  fee,
+  max_patients,
+  booking_start_time,
+  booking_end_time
+) VALUES (
+  '<doctor-uuid>',
+  50000,      -- ₹500 (in paise)
+  30,         -- Max 30 patients per day
+  '06:00',    -- Bookings start at 6 AM
+  '22:00'     -- Bookings end at 10 PM
+);
+```
+
+#### Doctor Configuration Fields
+
+| Field | Type | Description | Default |
+|-------|------|-------------|---------|
+| `fee` | INTEGER | Consultation fee in paise (500 rupees = 50000 paise) | 50000 |
+| `max_patients` | INTEGER | Maximum bookings per day | 30 |
+| `booking_start_time` | TEXT | Start of booking window (HH:MM) | '06:00' |
+| `booking_end_time` | TEXT | End of booking window (HH:MM) | '22:00' |
+
+<Note>
+Doctor configurations persist across days. Daily state (current count, status) is created automatically on first booking attempt each day.
+</Note>
+
+## Runtime Configuration
+
+### Daily State Management
+
+Each doctor gets a `doctor_daily_states` row created automatically on the first booking of the day. This row tracks:
+
+- **current_count**: Number of confirmed bookings
+- **status**: OPEN, PAUSED, or CLOSED
+- **date**: The date in clinic timezone
+
+You can manually create a daily state:
+
+```sql
+INSERT INTO doctor_daily_states (doctor_id, date, current_count, status)
+VALUES ('<doctor-uuid>', '2026-03-04', 0, 'OPEN');
+```
+
+### Status Values
+
+| Status | Description | Visible to Patients |
+|--------|-------------|---------------------|
+| `OPEN` | Accepting bookings | ✅ Yes |
+| `PAUSED` | Temporarily stopped | ❌ No |
+| `CLOSED` | Closed for the day | ❌ No |
+
+<Tabs>
+  <Tab title="Open Status">
+    The default status. Doctor appears in booking lists and accepts new appointments.
+    ```sql
+    UPDATE doctor_daily_states 
+    SET status = 'OPEN' 
+    WHERE doctor_id = '<doctor-uuid>' AND date = CURRENT_DATE;
+    ```
+  </Tab>
+  <Tab title="Paused Status">
+    Temporarily stop bookings. Can be resumed later.
+    ```sql
+    UPDATE doctor_daily_states 
+    SET status = 'PAUSED' 
+    WHERE doctor_id = '<doctor-uuid>' AND date = CURRENT_DATE;
+    ```
+  </Tab>
+  <Tab title="Closed Status">
+    Permanently close bookings for the day. Cannot be reopened.
+    ```sql
+    UPDATE doctor_daily_states 
+    SET status = 'CLOSED' 
+    WHERE doctor_id = '<doctor-uuid>' AND date = CURRENT_DATE;
+    ```
+  </Tab>
+</Tabs>
+
+## WhatsApp Configuration
+
+### Phone Number Settings
+
+Each clinic must have a configured WhatsApp Business phone number with:
+
+1. **Phone Number ID**: Obtained from Meta Business Manager
+2. **Permanent Access Token**: System User token with `whatsapp_business_messaging` permission
+3. **Webhook Configuration**:
+   - URL: `https://your-domain.com/webhook`
+   - Verify Token: Match `WHATSAPP_VERIFY_TOKEN` in `.env`
+   - Subscribed fields: `messages`
+
+### Client Configuration
+
+WhatsApp client settings are in `src/whatsapp/client.js`:
+
+```javascript
+const WHATSAPP_API_BASE = `https://graph.facebook.com/${env.WHATSAPP_API_VERSION}`;
+
+async function sendText(phoneNumberId, accessToken, to, message) {
+  await axios.post(
+    `${WHATSAPP_API_BASE}/${phoneNumberId}/messages`,
+    {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'text',
+      text: { body: message }
+    },
+    {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      }
+    }
+  );
+}
+```
+
+## Razorpay Configuration
+
+### API Keys
+
+Razorpay provides two sets of keys:
+
+- **Test Mode**: For development (`rzp_test_...`)
+- **Live Mode**: For production (`rzp_live_...`)
+
+Set the appropriate keys in your `.env` file.
+
+### Webhook Configuration
+
+Configure Razorpay to send webhooks to:
+
+```
+https://your-domain.com/payment/webhook
+```
+
+Subscribe to these events:
+- `payment.captured`
+- `order.paid`
+- `payment_link.paid`
+- `qr_code.credited`
+
+Set the webhook secret to match `RAZORPAY_WEBHOOK_SECRET` in your `.env`.
+
+### Payment Link Generation
+
+BookLine creates Razorpay orders with metadata:
+
+```javascript
+const order = await razorpay.orders.create({
+  amount: fee,           // In paise
+  currency: 'INR',
+  notes: {
+    clinic_id: clinicId,
+    doctor_id: doctorId,
+    patient_phone: from,
+    date: todayStr
+  }
+});
+
+const paymentLink = `https://pages.razorpay.com/pl_${order.id}`;
+```
+
+## Order Expiry Configuration
+
+Configure how long patients have to complete payment before orders expire.
+
+### Expiry Time
+
+Set in `.env`:
+```bash
+ORDER_EXPIRY_MINUTES=10
+```
+
+Default: 10 minutes
+
+### Cron Job Schedule
+
+The expiry job runs every 2 minutes:
+
+```javascript
+// From src/jobs/expiryJob.js
+cron.schedule('*/2 * * * *', async () => {
+  const { data: expiredCount } = await supabase.rpc('expire_stale_orders');
+  if (expiredCount > 0) {
+    console.log(`[ExpiryJob] Expired ${expiredCount} stale orders`);
+  }
+});
+```
+
+To change the schedule, modify the cron expression:
+- `*/2 * * * *` - Every 2 minutes (default)
+- `*/5 * * * *` - Every 5 minutes
+- `*/10 * * * *` - Every 10 minutes
+- `0 * * * *` - Every hour
+
+<Info>
+More frequent checks = faster order expiry = less patient confusion. But also more database load.
+</Info>
+
+## Settlement Configuration
+
+BookLine uses a **5% platform fee** model:
+
+```javascript
+// From src/services/settlementService.js
+calculateSplit(amount) {
+  const platformFee = Math.floor(amount * 0.05);  // 5% to platform
+  const clinicShare = amount - platformFee;       // 95% to clinic
+  
+  return { platformFee, clinicShare, total: amount };
+}
+```
+
+To change the platform fee percentage:
+
+```javascript
+const PLATFORM_FEE_PERCENT = 0.05;  // Change to 0.10 for 10%, etc.
+
+calculateSplit(amount) {
+  const platformFee = Math.floor(amount * PLATFORM_FEE_PERCENT);
+  const clinicShare = amount - platformFee;
+  
+  return { platformFee, clinicShare, total: amount };
+}
+```
+
+## Timezone Configuration
+
+BookLine is **timezone-aware**. All date operations use the clinic's configured timezone.
+
+### Setting Clinic Timezone
+
+```sql
+UPDATE clinics SET timezone = 'America/New_York' WHERE id = '<clinic-uuid>';
+```
+
+### Supported Timezones
+
+Use IANA timezone names:
+- `Asia/Kolkata` - India
+- `America/New_York` - US Eastern
+- `America/Los_Angeles` - US Pacific
+- `Europe/London` - UK
+- `Asia/Dubai` - UAE
+- `Australia/Sydney` - Australia
+
+### Date Utilities
+
+BookLine uses Luxon for timezone handling:
+
+```javascript
+// From src/utils/timezone.js
+const { DateTime } = require('luxon');
+
+function getTodayInTimezone(timezone) {
+  return DateTime.now().setZone(timezone).toISODate();
+}
+
+function isWithinBookingWindow(startTime, endTime, timezone) {
+  const now = DateTime.now().setZone(timezone);
+  const [startH, startM] = startTime.split(':').map(Number);
+  const [endH, endM] = endTime.split(':').map(Number);
+  
+  const start = now.set({ hour: startH, minute: startM });
+  const end = now.set({ hour: endH, minute: endM });
+  
+  return now >= start && now <= end;
+}
+```
+
+## Performance Tuning
+
+### Database Indexes
+
+BookLine creates indexes for common queries:
+
+```sql
+-- Clinics
+CREATE UNIQUE INDEX idx_clinics_phone_number_id ON clinics (phone_number_id);
+
+-- Doctors
+CREATE INDEX idx_doctors_clinic_id ON doctors (clinic_id);
+
+-- Doctor configs
+CREATE UNIQUE INDEX idx_doctor_configs_doctor_id ON doctor_configs (doctor_id);
+
+-- Doctor daily states
+CREATE UNIQUE INDEX idx_daily_state_doctor_date ON doctor_daily_states (doctor_id, date);
+
+-- Orders
+CREATE UNIQUE INDEX idx_orders_gateway_order_id ON orders (gateway_order_id);
+CREATE INDEX idx_orders_status_expires ON orders (status, expires_at);
+
+-- Bookings
+CREATE UNIQUE INDEX idx_bookings_order_id ON bookings (order_id);
+CREATE INDEX idx_bookings_doctor_date ON bookings (doctor_id, date);
+
+-- Conversation states
+CREATE UNIQUE INDEX idx_conversation_states_phone_clinic ON conversation_states (phone, clinic_id);
+
+-- Admin sessions
+CREATE INDEX idx_admin_sessions_phone ON admin_sessions (phone, expires_at);
+```
+
+### Connection Pooling
+
+Supabase client handles connection pooling automatically. For high-traffic deployments, consider:
+
+```javascript
+const { createClient } = require('@supabase/supabase-js');
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  {
+    db: {
+      schema: 'public'
+    },
+    auth: {
+      persistSession: false
+    }
+  }
+);
+```
+
+## Security Best Practices
+
+<AccordionGroup>
+  <Accordion title="Rotate Access Tokens">
+    Regularly rotate WhatsApp and Razorpay access tokens. Store them securely in environment variables, never in code.
+  </Accordion>
+
+  <Accordion title="Use Strong Admin PINs">
+    Replace default `1234` PIN with a strong, unique PIN per clinic:
+    ```sql
+    UPDATE clinics SET admin_pin = 'your-strong-pin' WHERE id = '<clinic-uuid>';
+    ```
+  </Accordion>
+
+  <Accordion title="Enable HTTPS">
+    Always use HTTPS in production. Webhooks from Meta and Razorpay require secure endpoints.
+  </Accordion>
+
+  <Accordion title="Restrict Database Access">
+    Use Supabase Row Level Security (RLS) policies to restrict access:
+    ```sql
+    ALTER TABLE clinics ENABLE ROW LEVEL SECURITY;
+    
+    CREATE POLICY "Service role full access" ON clinics
+    FOR ALL USING (auth.role() = 'service_role');
+    ```
+  </Accordion>
+
+  <Accordion title="Monitor Webhook Signatures">
+    Always verify webhook signatures from Razorpay:
+    ```javascript
+    const crypto = require('crypto');
+    
+    function verifyWebhookSignature(body, signature, secret) {
+      const expectedSignature = crypto
+        .createHmac('sha256', secret)
+        .update(body)
+        .digest('hex');
+      
+      return crypto.timingSafeEqual(
+        Buffer.from(expectedSignature),
+        Buffer.from(signature)
+      );
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| "Missing required environment variable" | Check your `.env` file contains all required variables |
+| Bookings not creating daily state | Verify `doctor_configs` exists for the doctor |
+| Wrong timezone for bookings | Update `clinics.timezone` to correct IANA timezone |
+| Orders not expiring | Check the cron job is running in logs |
+| Admin PIN not working | Verify PIN in `clinics.admin_pin` matches what admin enters |
+| Webhook verification failing | Ensure `RAZORPAY_WEBHOOK_SECRET` matches Razorpay dashboard |
+
+## Related Documentation
+
+<CardGroup cols={2}>
+  <Card title="Environment Variables" icon="gear" href="/technical/environment-variables">
+    Complete environment variable reference
+  </Card>
+  <Card title="Database Schema" icon="database" href="/architecture/database-schema">
+    Full database schema documentation
+  </Card>
+  <Card title="WhatsApp Setup" icon="message" href="/technical/whatsapp-setup">
+    Configure WhatsApp Cloud API
+  </Card>
+  <Card title="Razorpay Setup" icon="credit-card" href="/technical/razorpay-setup">
+    Configure Razorpay payment integration
+  </Card>
+</CardGroup>

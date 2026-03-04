@@ -1,0 +1,696 @@
+---
+title: Detailed Setup
+description: Complete production configuration guide for BookLine
+---
+
+# Detailed Setup Guide
+
+This guide covers complete production setup including service configuration, security hardening, and operational considerations.
+
+## System Requirements
+
+### Server Requirements
+
+- **Node.js**: 18.x or higher (LTS recommended)
+- **Memory**: Minimum 512MB RAM (1GB+ recommended for production)
+- **Storage**: 1GB for application + logs
+- **Network**: Public HTTPS endpoint for webhooks
+
+### External Services
+
+<CardGroup cols={3}>
+  <Card title="Supabase" icon="database">
+    PostgreSQL database with RPC support
+  </Card>
+  <Card title="Meta Business" icon="meta">
+    WhatsApp Cloud API access
+  </Card>
+  <Card title="Razorpay" icon="credit-card">
+    Payment gateway account
+  </Card>
+</CardGroup>
+
+## Detailed Configuration
+
+### 1. Supabase Setup
+
+<Steps>
+  <Step title="Create Supabase Project">
+    1. Go to [supabase.com](https://supabase.com) and sign in
+    2. Click **New Project**
+    3. Choose organization and set:
+       - **Name**: `bookline-production`
+       - **Database Password**: Strong password (save this securely)
+       - **Region**: Closest to your users
+    4. Wait for project provisioning (~2 minutes)
+  </Step>
+
+  <Step title="Run Database Migration">
+    Navigate to **SQL Editor** in Supabase dashboard:
+    
+    ```sql
+    -- Enable UUID extension
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+    -- Create clinics table
+    CREATE TABLE IF NOT EXISTS clinics (
+      id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      name          TEXT NOT NULL,
+      phone_number_id TEXT NOT NULL UNIQUE,
+      waba_id       TEXT,
+      access_token  TEXT NOT NULL,
+      admin_pin     TEXT NOT NULL DEFAULT '1234',
+      timezone      TEXT NOT NULL DEFAULT 'Asia/Kolkata',
+      active        BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    -- See supabase/migration.sql for complete schema
+    ```
+    
+    <Note>
+      Copy and run the complete `supabase/migration.sql` file from the repository. The above is just an excerpt.
+    </Note>
+  </Step>
+
+  <Step title="Configure Row Level Security (Optional)">
+    For additional security, enable RLS:
+    
+    ```sql
+    -- Enable RLS on all tables
+    ALTER TABLE clinics ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE doctors ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE bookings ENABLE ROW LEVEL SECURITY;
+    
+    -- Create policies as needed for your use case
+    ```
+    
+    <Warning>
+      BookLine uses the service role key which bypasses RLS. Only enable RLS if you plan to expose direct database access to other clients.
+    </Warning>
+  </Step>
+
+  <Step title="Get API Credentials">
+    Navigate to **Settings > API**:
+    
+    1. Copy **Project URL** → This is your `SUPABASE_URL`
+    2. Copy **service_role** key → This is your `SUPABASE_SERVICE_ROLE_KEY`
+    
+    <Warning>
+      Use the **service_role** key, not the **anon** key. The service role bypasses RLS and is required for server-side operations.
+    </Warning>
+  </Step>
+</Steps>
+
+### 2. Meta WhatsApp Cloud API Setup
+
+<Steps>
+  <Step title="Create Meta Business App">
+    1. Go to [developers.facebook.com](https://developers.facebook.com)
+    2. Click **My Apps > Create App**
+    3. Select **Business** type
+    4. Fill in details:
+       - **App Name**: "BookLine Clinic"
+       - **Contact Email**: Your email
+       - **Business Account**: Select or create one
+  </Step>
+
+  <Step title="Add WhatsApp Product">
+    1. In your app dashboard, click **Add Product**
+    2. Find **WhatsApp** and click **Set Up**
+    3. Select or create a **WhatsApp Business Account**
+    4. Create or select a **Business Portfolio**
+  </Step>
+
+  <Step title="Configure Test Phone Number">
+    Meta provides a test number for development:
+    
+    1. Go to **WhatsApp > API Setup**
+    2. Note the **Test number** (e.g., `+1 555-0100`)
+    3. Add your personal number to **Recipient phone numbers**
+    4. Send a test message to verify
+    
+    <Note>
+      Test numbers have limitations (5 recipient numbers, 250 messages/day). For production, you'll need to add a real business phone number.
+    </Note>
+  </Step>
+
+  <Step title="Get Access Token and Phone Number ID">
+    In **WhatsApp > API Setup**:
+    
+    1. Copy the **Temporary access token** (24-hour expiry)
+    2. Copy the **Phone number ID** (looks like `1234567890`)
+    
+    For production, generate a permanent token:
+    
+    1. Go to **Settings > Basic**
+    2. Generate a **System User Access Token** with `whatsapp_business_messaging` permission
+    3. Store this securely - it doesn't expire
+  </Step>
+
+  <Step title="Configure Webhook">
+    In **WhatsApp > Configuration**:
+    
+    1. Click **Edit** next to Webhook
+    2. Enter:
+       - **Callback URL**: `https://your-domain.com/webhook`
+       - **Verify Token**: Choose a random string (e.g., `bookline_2026_secure_token`)
+    3. Click **Verify and Save**
+    4. Under **Webhook fields**, subscribe to:
+       - ✅ `messages`
+    
+    Use the same verify token in your `.env` file as `WHATSAPP_VERIFY_TOKEN`.
+  </Step>
+
+  <Step title="Add Production Phone Number">
+    For production:
+    
+    1. Go to **WhatsApp > Phone Numbers**
+    2. Click **Add Phone Number**
+    3. Verify your business phone number via SMS/call
+    4. Complete Business Verification if required
+    5. Update your database with the new `phone_number_id`
+  </Step>
+</Steps>
+
+### 3. Razorpay Setup
+
+<Steps>
+  <Step title="Create Razorpay Account">
+    1. Go to [razorpay.com](https://razorpay.com) and sign up
+    2. Complete KYC verification (required for live mode)
+    3. Navigate to **Settings > API Keys**
+  </Step>
+
+  <Step title="Generate API Keys">
+    **For Testing (Test Mode)**:
+    
+    1. Switch to **Test Mode** (toggle in top-left)
+    2. Click **Generate Test Key**
+    3. Copy:
+       - **Key ID** (starts with `rzp_test_`) → `RAZORPAY_KEY_ID`
+       - **Key Secret** → `RAZORPAY_KEY_SECRET`
+    
+    **For Production (Live Mode)**:
+    
+    1. Switch to **Live Mode**
+    2. Click **Generate Live Key** (requires KYC completion)
+    3. Copy credentials
+    
+    <Warning>
+      Keep Key Secret secure. Never commit to version control or expose in client-side code.
+    </Warning>
+  </Step>
+
+  <Step title="Configure Webhook">
+    1. Go to **Settings > Webhooks**
+    2. Click **Create New Webhook**
+    3. Enter:
+       - **URL**: `https://your-domain.com/payment/webhook`
+       - **Secret**: Generate a random string (e.g., `whsec_abc123xyz`) → `RAZORPAY_WEBHOOK_SECRET`
+       - **Alert Email**: Your email
+    4. Select events:
+       - ✅ `payment.captured`
+       - ✅ `order.paid`
+    5. Save
+    
+    <Note>
+      Razorpay will send a test webhook to verify the URL is accessible.
+    </Note>
+  </Step>
+
+  <Step title="Enable Payment Methods">
+    Go to **Settings > Payment Methods** and enable:
+    
+    - UPI (PhonePe, Google Pay, etc.)
+    - Cards (Visa, Mastercard, RuPay)
+    - Netbanking
+    - Wallets (Paytm, etc.)
+    
+    Configure settlement preferences under **Settings > Settlements**.
+  </Step>
+</Steps>
+
+### 4. Environment Configuration
+
+Create a `.env` file with all required variables:
+
+```bash .env
+# =========================
+# BookLine Environment Config
+# =========================
+
+# Server
+PORT=3000
+NODE_ENV=production
+
+# Supabase
+SUPABASE_URL=https://abcdefgh.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+
+# Meta WhatsApp Cloud API
+WHATSAPP_VERIFY_TOKEN=bookline_2026_secure_token
+WHATSAPP_API_VERSION=v21.0
+WHATSAPP_ACCESS_TOKEN=EAABsbCS...  # Optional: default access token
+
+# Razorpay
+RAZORPAY_KEY_ID=rzp_live_abcdefgh12345678
+RAZORPAY_KEY_SECRET=xyz789secretkey
+RAZORPAY_WEBHOOK_SECRET=whsec_abc123xyz
+
+# Order Expiry (minutes)
+ORDER_EXPIRY_MINUTES=10
+
+# Owner Phone (for admin approvals)
+OWNER_PHONE=+919876543210
+```
+
+<Accordion title="Environment Variable Details">
+  | Variable | Description | Example |
+  |----------|-------------|----------|
+  | `PORT` | Server listening port | `3000` |
+  | `NODE_ENV` | Environment mode | `production` or `development` |
+  | `SUPABASE_URL` | Supabase project URL | `https://xyz.supabase.co` |
+  | `SUPABASE_SERVICE_ROLE_KEY` | Service role JWT | Starts with `eyJ...` |
+  | `WHATSAPP_VERIFY_TOKEN` | Webhook verification token | Any random string |
+  | `WHATSAPP_API_VERSION` | Meta API version | `v21.0` |
+  | `WHATSAPP_ACCESS_TOKEN` | Default WhatsApp access token | Optional (can be per-clinic) |
+  | `RAZORPAY_KEY_ID` | Razorpay key identifier | `rzp_test_...` or `rzp_live_...` |
+  | `RAZORPAY_KEY_SECRET` | Razorpay secret key | Keep secure |
+  | `RAZORPAY_WEBHOOK_SECRET` | Razorpay webhook secret | `whsec_...` |
+  | `ORDER_EXPIRY_MINUTES` | Payment link expiry | `10` (default: 20) |
+  | `OWNER_PHONE` | Platform owner phone | `+919876543210` |
+</Accordion>
+
+### 5. Application Deployment
+
+<Tabs>
+  <Tab title="Render">
+    <Steps>
+      <Step title="Prepare Repository">
+        1. Commit all code to Git
+        2. Push to GitHub/GitLab
+        3. Ensure `package.json` has start script:
+        
+        ```json package.json
+        {
+          "scripts": {
+            "start": "node src/server.js",
+            "dev": "node --watch src/server.js"
+          }
+        }
+        ```
+      </Step>
+
+      <Step title="Create Render Service">
+        1. Go to [render.com](https://render.com)
+        2. Click **New > Web Service**
+        3. Connect your repository
+        4. Configure:
+           - **Name**: `bookline-production`
+           - **Environment**: `Node`
+           - **Build Command**: `npm install`
+           - **Start Command**: `npm start`
+           - **Plan**: Free or Starter
+      </Step>
+
+      <Step title="Add Environment Variables">
+        In Render dashboard, go to **Environment** tab and add all variables from `.env`.
+        
+        <Warning>
+          Don't copy `.env` directly. Add each variable individually in Render's UI.
+        </Warning>
+      </Step>
+
+      <Step title="Deploy">
+        Click **Create Web Service**. Render will:
+        
+        1. Clone your repository
+        2. Install dependencies
+        3. Start the server
+        4. Assign a public URL: `https://bookline-xyz.onrender.com`
+        
+        Use this URL for webhook configuration.
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="Railway">
+    <Steps>
+      <Step title="Install Railway CLI">
+        ```bash
+        npm install -g @railway/cli
+        railway login
+        ```
+      </Step>
+
+      <Step title="Initialize Project">
+        ```bash
+        railway init
+        railway link
+        ```
+      </Step>
+
+      <Step title="Add Environment Variables">
+        ```bash
+        railway variables set SUPABASE_URL=https://...
+        railway variables set SUPABASE_SERVICE_ROLE_KEY=eyJ...
+        # Add all other variables
+        ```
+      </Step>
+
+      <Step title="Deploy">
+        ```bash
+        railway up
+        ```
+        
+        Railway will provide a public URL.
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="VPS (Ubuntu)">
+    <Steps>
+      <Step title="Install Node.js">
+        ```bash
+        curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+        sudo apt-get install -y nodejs
+        node --version  # Verify installation
+        ```
+      </Step>
+
+      <Step title="Clone and Setup">
+        ```bash
+        cd /var/www
+        git clone https://github.com/your-org/bookline.git
+        cd bookline
+        npm install --production
+        cp .env.example .env
+        nano .env  # Edit with your credentials
+        ```
+      </Step>
+
+      <Step title="Install PM2">
+        ```bash
+        sudo npm install -g pm2
+        pm2 start src/server.js --name bookline
+        pm2 save
+        pm2 startup  # Follow instructions to enable auto-start
+        ```
+      </Step>
+
+      <Step title="Setup Nginx Reverse Proxy">
+        ```nginx /etc/nginx/sites-available/bookline
+        server {
+          listen 80;
+          server_name bookline.yourapp.com;
+
+          location / {
+            proxy_pass http://localhost:3000;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection 'upgrade';
+            proxy_set_header Host $host;
+            proxy_cache_bypass $http_upgrade;
+          }
+        }
+        ```
+        
+        ```bash
+        sudo ln -s /etc/nginx/sites-available/bookline /etc/nginx/sites-enabled/
+        sudo nginx -t
+        sudo systemctl restart nginx
+        ```
+      </Step>
+
+      <Step title="Setup SSL with Certbot">
+        ```bash
+        sudo apt-get install certbot python3-certbot-nginx
+        sudo certbot --nginx -d bookline.yourapp.com
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Clinic Registration
+
+After deployment, register your first clinic:
+
+<Steps>
+  <Step title="Send Registration Command">
+    From the owner's WhatsApp number (set in `OWNER_PHONE`), send:
+    
+    ```
+    registerxkr
+    ```
+  </Step>
+
+  <Step title="Fill Clinic Details">
+    The bot will ask for:
+    
+    1. **Clinic Name**: "Dr. Smith's Clinic"
+    2. **WhatsApp Phone Number ID**: `1234567890` (from Meta dashboard)
+    3. **Access Token**: Permanent token from Meta
+    4. **Admin PIN**: 4-digit PIN for clinic admin access
+    5. **Timezone**: `Asia/Kolkata`
+  </Step>
+
+  <Step title="Approve Clinic">
+    After registration, you'll receive a clinic ID. Approve it:
+    
+    ```
+    APPROVE <clinic-id>
+    ```
+  </Step>
+</Steps>
+
+## Doctor Configuration
+
+<Steps>
+  <Step title="Access Admin Panel">
+    From clinic admin's WhatsApp, send:
+    
+    ```
+    adminxkr
+    ```
+    
+    Enter PIN when prompted.
+  </Step>
+
+  <Step title="Add Doctor">
+    Use the admin menu to:
+    
+    1. Select "Add Doctor"
+    2. Enter doctor name
+    3. Set specialization (optional)
+  </Step>
+
+  <Step title="Configure Doctor Settings">
+    For each doctor, set:
+    
+    - **Fee**: e.g., `500` (₹500)
+    - **Daily Capacity**: e.g., `30` patients
+    - **Booking Window**: e.g., `06:00` to `22:00`
+  </Step>
+</Steps>
+
+## Testing
+
+<Steps>
+  <Step title="Health Check">
+    ```bash
+    curl https://your-domain.com/health
+    ```
+    
+    Expected response:
+    ```json
+    {"status": "ok", "timestamp": "2026-03-04T12:00:00.000Z"}
+    ```
+  </Step>
+
+  <Step title="Test Patient Flow">
+    From a test WhatsApp number:
+    
+    1. Send: `hi`
+    2. Select a doctor from the list
+    3. Confirm booking
+    4. Complete payment (use Razorpay test cards in test mode)
+    5. Verify booking confirmation message
+  </Step>
+
+  <Step title="Test Admin Flow">
+    1. Send: `adminxkr`
+    2. Enter PIN
+    3. Select doctor
+    4. Try changing fee/cap
+    5. Verify updates take effect
+  </Step>
+</Steps>
+
+## Production Checklist
+
+<Steps>
+  <Step title="Security">
+    - [ ] Use environment variables for all secrets
+    - [ ] Enable HTTPS (Let's Encrypt/Cloudflare)
+    - [ ] Set strong admin PINs
+    - [ ] Rotate API keys regularly
+    - [ ] Enable Razorpay webhook signature verification
+    - [ ] Use Supabase service role key (not anon key)
+  </Step>
+
+  <Step title="Performance">
+    - [ ] Enable connection pooling in Supabase
+    - [ ] Set appropriate `ORDER_EXPIRY_MINUTES`
+    - [ ] Monitor database query performance
+    - [ ] Set up database indexes (already in migration.sql)
+  </Step>
+
+  <Step title="Monitoring">
+    - [ ] Set up error logging (e.g., Sentry)
+    - [ ] Monitor webhook delivery rates
+    - [ ] Track payment success/failure rates
+    - [ ] Set up uptime monitoring (e.g., UptimeRobot)
+    - [ ] Review Razorpay settlement reports
+  </Step>
+
+  <Step title="Compliance">
+    - [ ] Complete WhatsApp Business Verification
+    - [ ] Complete Razorpay KYC
+    - [ ] Add privacy policy link to WhatsApp messages
+    - [ ] Set up customer support contact
+  </Step>
+</Steps>
+
+## Backup and Recovery
+
+### Database Backups
+
+Supabase automatically backs up your database daily. To create manual backups:
+
+1. Go to Supabase **Database > Backups**
+2. Click **Create Backup**
+
+For custom backup scripts:
+
+```bash
+pg_dump -h db.abcdefgh.supabase.co -U postgres -d postgres > backup.sql
+```
+
+### Application State
+
+BookLine is stateless - all data is in Supabase. To recover:
+
+1. Restore database from backup
+2. Redeploy application with same environment variables
+3. Reconfigure webhooks if URLs changed
+
+## Scaling Considerations
+
+<AccordionGroup>
+  <Accordion title="Handling High Traffic">
+    - **Horizontal Scaling**: Deploy multiple instances behind a load balancer
+    - **Database**: Upgrade Supabase plan for higher connection limits
+    - **Rate Limiting**: Implement rate limiting for webhook endpoints
+    - **Caching**: Cache frequently accessed clinic/doctor data
+  </Accordion>
+
+  <Accordion title="Multi-Clinic Support">
+    BookLine supports unlimited clinics on a single deployment:
+    
+    - Each clinic has its own `phone_number_id` and `access_token`
+    - Clinics are isolated by foreign key relationships
+    - Use fuzzy search to let patients discover any clinic
+  </Accordion>
+
+  <Accordion title="Regional Deployment">
+    For global deployments:
+    
+    - Deploy servers in multiple regions
+    - Use geographically close Supabase regions
+    - Configure timezone per clinic in database
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Webhook Not Receiving Events">
+    **Check**:
+    - Server is publicly accessible via HTTPS
+    - Webhook URL is correct in Meta/Razorpay dashboard
+    - No firewall blocking Meta/Razorpay IPs
+    - Server logs show incoming POST requests
+    
+    **Test manually**:
+    ```bash
+    # Test WhatsApp webhook verification
+    curl "https://your-domain.com/webhook?hub.mode=subscribe&hub.verify_token=your-token&hub.challenge=test"
+    
+    # Should return: test
+    ```
+  </Accordion>
+
+  <Accordion title="Payment Webhook Signature Mismatch">
+    **Cause**: `RAZORPAY_WEBHOOK_SECRET` doesn't match Razorpay dashboard.
+    
+    **Fix**:
+    1. Go to Razorpay **Settings > Webhooks**
+    2. Copy the secret
+    3. Update `.env` file
+    4. Restart server
+  </Accordion>
+
+  <Accordion title="Database Connection Pool Exhausted">
+    **Symptoms**: `remaining connection slots reserved` errors
+    
+    **Solutions**:
+    - Upgrade Supabase plan for more connections
+    - Implement connection pooling:
+    
+    ```javascript
+    const { createClient } = require('@supabase/supabase-js');
+    
+    const supabase = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_ROLE_KEY,
+      {
+        db: {
+          poolSize: 10  // Limit concurrent connections
+        }
+      }
+    );
+    ```
+  </Accordion>
+
+  <Accordion title="Orders Expiring Too Quickly">
+    **Cause**: `ORDER_EXPIRY_MINUTES` too low for your payment flow.
+    
+    **Fix**: Increase timeout in `.env`:
+    
+    ```bash
+    ORDER_EXPIRY_MINUTES=15  # Give patients more time
+    ```
+    
+    Default is 20 minutes. Recommended: 10-15 minutes.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="API Reference" icon="code" href="/api/services">
+    Explore webhook endpoints and RPC functions
+  </Card>
+  <Card title="Admin Commands" icon="terminal" href="/guides/admin-flow">
+    Learn all WhatsApp admin commands
+  </Card>
+  <Card title="Payment Flows" icon="credit-card" href="/technical/razorpay-setup">
+    Understand payment lifecycle and refunds
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/deployment/monitoring">
+    Common issues and solutions
+  </Card>
+</CardGroup>

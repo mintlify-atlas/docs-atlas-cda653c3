@@ -1,0 +1,464 @@
+---
+title: Monitoring & Operations
+description: Monitor your BookLine production deployment and troubleshoot issues
+---
+
+Proper monitoring ensures your BookLine system runs smoothly and helps you quickly identify issues.
+
+## Health Check Endpoint
+
+BookLine provides a health check endpoint for uptime monitoring:
+
+```http
+GET /health
+```
+
+### Response
+
+```json
+{
+  "status": "ok",
+  "service": "BookLine",
+  "timestamp": "2026-03-04T10:30:00.000Z"
+}
+```
+
+### Status Codes
+
+- `200 OK` - Service is healthy
+- `404` - Service is down or route misconfigured
+- `5xx` - Internal server error
+
+<Note>
+  Configure your monitoring service to poll `/health` every 1-5 minutes.
+</Note>
+
+## Uptime Monitoring
+
+Set up automated uptime monitoring using one of these services:
+
+<Steps>
+  <Step title="Choose a Monitoring Service">
+    - [UptimeRobot](https://uptimerobot.com) (Free tier available)
+    - [Better Uptime](https://betteruptime.com)
+    - [Pingdom](https://www.pingdom.com)
+    - [StatusCake](https://www.statuscake.com)
+  </Step>
+
+  <Step title="Create HTTP Monitor">
+    Configure the monitor with:
+    - **URL**: `https://your-app.onrender.com/health`
+    - **Method**: `GET`
+    - **Interval**: 5 minutes
+    - **Timeout**: 30 seconds
+    - **Expected Status**: `200`
+  </Step>
+
+  <Step title="Set Up Alerts">
+    Configure alerts to notify you via:
+    - Email
+    - SMS
+    - Slack
+    - Discord
+  </Step>
+</Steps>
+
+## Application Logging
+
+### Server Startup Logs
+
+When the server starts successfully, you'll see:
+
+```bash
+🏥 BookLine Server running on port 3000
+📡 Environment: production
+🔗 https://bookline-api.onrender.com/health
+📱 https://bookline-api.onrender.com/webhook
+💳 https://bookline-api.onrender.com/payment/webhook
+
+[Cron] ✅ Order expiry job scheduled (every 2 minutes)
+```
+
+### Background Job Logs
+
+The order expiry cron job logs when it processes orders:
+
+```bash
+[Cron] Expired 3 stale orders, notified 3 patients
+```
+
+### Error Logs
+
+Watch for these error patterns:
+
+```bash
+[Server] Unhandled error: ...
+[Cron] Order expiry error: ...
+[Cron] Notification error: ...
+```
+
+<Warning>
+  If you see repeated error logs, investigate immediately. Check database connectivity, API credentials, and webhook configurations.
+</Warning>
+
+## Monitoring Key Metrics
+
+### System Metrics
+
+Monitor these platform-level metrics (available in Render dashboard):
+
+- **CPU Usage** - Should be < 80% under normal load
+- **Memory Usage** - Watch for memory leaks
+- **Response Time** - Should be < 1s for most requests
+- **Error Rate** - Should be < 1%
+
+### Application Metrics
+
+Track these business metrics:
+
+| Metric | Query | Notes |
+|--------|-------|-------|
+| **Active Bookings** | Count of `status = 'confirmed'` | Daily bookings |
+| **Pending Payments** | Count of `status = 'pending'` | Should auto-expire |
+| **Failed Payments** | Count of `status = 'payment_failed'` | Investigate if high |
+| **Expired Orders** | Count of `status = 'expired'` | Track expiry rate |
+
+### Database Monitoring
+
+Supabase provides built-in monitoring:
+
+1. Go to your [Supabase Dashboard](https://app.supabase.com)
+2. Navigate to **Database** > **Performance**
+3. Monitor:
+   - Active connections
+   - Query performance
+   - Slow queries
+   - Database size
+
+## Webhook Monitoring
+
+### WhatsApp Webhook
+
+Monitor WhatsApp message delivery:
+
+#### Success Pattern
+```bash
+[Webhook] POST /webhook - Message received
+[WhatsApp] Sent: "Select a time slot..."
+```
+
+#### Failure Pattern
+```bash
+[WhatsApp] Error: Invalid phone_number_id
+[WhatsApp] Error: Message quota exceeded
+```
+
+<Accordion title="Common WhatsApp Errors">
+  - **Invalid phone_number_id**: Check clinic's `phone_number_id` in database
+  - **Quota exceeded**: Upgrade your WhatsApp Business tier
+  - **Invalid access token**: Regenerate `WHATSAPP_ACCESS_TOKEN`
+  - **Template not approved**: Submit template for approval in Meta console
+</Accordion>
+
+### Razorpay Webhook
+
+Monitor payment webhook delivery:
+
+#### Success Pattern
+```bash
+POST /payment/webhook - payment.captured
+[Payment] Payment rzp_xxx captured for order ord_xxx
+```
+
+#### Failure Pattern
+```bash
+[Payment] Invalid signature
+[Payment] Order not found
+```
+
+<Warning>
+  If Razorpay webhooks fail repeatedly, check that `RAZORPAY_WEBHOOK_SECRET` matches your dashboard configuration.
+</Warning>
+
+### Webhook Retry Behavior
+
+Both WhatsApp and Razorpay retry failed webhooks:
+
+- **WhatsApp**: Retries for up to 24 hours with exponential backoff
+- **Razorpay**: Retries up to 3 times over 2 hours
+
+<Note>
+  Your webhook endpoints (`/webhook` and `/payment/webhook`) should respond within 5 seconds to avoid timeouts.
+</Note>
+
+## Cron Job Monitoring
+
+### Order Expiry Job
+
+The expiry job runs **every 2 minutes**:
+
+```javascript
+// src/jobs/expiryJob.js:16
+cron.schedule('*/2 * * * *', async () => {
+  // Find and expire stale orders
+});
+```
+
+### Monitoring Cron Execution
+
+Watch for these log patterns:
+
+```bash
+# Normal operation (no expired orders)
+[Cron] ✅ Order expiry job scheduled (every 2 minutes)
+
+# Orders expired
+[Cron] Expired 2 stale orders, notified 2 patients
+
+# Errors
+[Cron] Order expiry error: Connection timeout
+[Cron] Notification error: Invalid phone number
+```
+
+### Verifying Cron Job Execution
+
+Query the database to ensure orders are expiring:
+
+```sql
+SELECT 
+  status,
+  COUNT(*) as count,
+  MAX(updated_at) as last_updated
+FROM orders
+WHERE status IN ('pending', 'expired')
+GROUP BY status;
+```
+
+Expected: Pending orders older than `ORDER_EXPIRY_MINUTES` should transition to `expired`.
+
+## Error Tracking
+
+For production error tracking, integrate a service like:
+
+### Sentry Integration
+
+<Steps>
+  <Step title="Install Sentry">
+    ```bash
+    npm install @sentry/node
+    ```
+  </Step>
+
+  <Step title="Initialize in server.js">
+    ```javascript
+    const Sentry = require('@sentry/node');
+
+    Sentry.init({
+      dsn: process.env.SENTRY_DSN,
+      environment: process.env.NODE_ENV,
+      tracesSampleRate: 1.0,
+    });
+
+    // Add Sentry error handler BEFORE other error handlers
+    app.use(Sentry.Handlers.errorHandler());
+    ```
+  </Step>
+
+  <Step title="Add SENTRY_DSN">
+    Set `SENTRY_DSN` environment variable in your deployment platform.
+  </Step>
+</Steps>
+
+### Alternative: LogDNA / Datadog
+
+For log aggregation without code changes, use platform integrations:
+
+- Render: Built-in log persistence (7 days on free tier)
+- Railway: Integrates with LogDNA
+- Heroku: Papertrail add-on
+
+## Performance Monitoring
+
+### Response Time Tracking
+
+Add simple response time logging:
+
+```javascript
+// Add to src/server.js after middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    if (duration > 1000) {
+      console.warn(`[Perf] ${req.method} ${req.path} took ${duration}ms`);
+    }
+  });
+  next();
+});
+```
+
+### Database Query Performance
+
+Use Supabase Studio to identify slow queries:
+
+1. Go to **Database** > **Roles & Policies**
+2. Enable query statistics
+3. Review **Performance** tab for slow queries
+
+<Note>
+  Consider adding database indexes if queries on `orders`, `slots`, or `doctors` tables are slow.
+</Note>
+
+## Alerts & Notifications
+
+Set up alerts for critical issues:
+
+### Critical Alerts (Immediate)
+
+- Health check endpoint returns non-200 status
+- Error rate > 5% over 5 minutes
+- Database connection failures
+- Webhook verification failures
+
+### Warning Alerts (Review within 1 hour)
+
+- High number of expired orders (> 10/hour)
+- Payment failures > 20%
+- WhatsApp API quota warnings
+- Slow response times (> 2s average)
+
+### Informational (Daily summary)
+
+- Total bookings created
+- Total payments captured
+- Total orders expired
+- Average response time
+
+## Incident Response
+
+### Service Down
+
+<Steps>
+  <Step title="Check Platform Status">
+    Verify Render/Railway status page for platform-wide issues.
+  </Step>
+
+  <Step title="Review Recent Deployments">
+    If a recent deployment caused the issue, rollback:
+    
+    ```bash
+    # In Render dashboard: Manual Deploy > select previous commit
+    ```
+  </Step>
+
+  <Step title="Check Logs">
+    Review application logs for startup errors or crashes.
+  </Step>
+
+  <Step title="Verify Environment Variables">
+    Ensure all required env vars are set and valid.
+  </Step>
+</Steps>
+
+### High Error Rate
+
+<Steps>
+  <Step title="Identify Error Pattern">
+    Check logs for repeated error messages.
+  </Step>
+
+  <Step title="Check External Dependencies">
+    - Supabase status: https://status.supabase.com
+    - Meta API status: https://metastatus.com
+    - Razorpay status: https://razorpay.com/status
+  </Step>
+
+  <Step title="Scale Resources">
+    If CPU/memory is maxed, upgrade your plan temporarily.
+  </Step>
+</Steps>
+
+### Database Connection Issues
+
+```bash
+[Error] Connection timeout
+[Error] Too many connections
+```
+
+**Solution**: Check Supabase connection pooler settings and consider upgrading your Supabase plan.
+
+## Maintenance Windows
+
+For planned maintenance:
+
+<Steps>
+  <Step title="Notify Users">
+    Update WhatsApp responses to mention maintenance window.
+  </Step>
+
+  <Step title="Disable Webhooks">
+    Temporarily disable webhooks in Meta and Razorpay dashboards.
+  </Step>
+
+  <Step title="Perform Maintenance">
+    Run migrations, deploy updates, etc.
+  </Step>
+
+  <Step title="Re-enable & Verify">
+    Re-enable webhooks and test end-to-end flow.
+  </Step>
+</Steps>
+
+## Daily Operations Checklist
+
+- [ ] Review error logs from past 24 hours
+- [ ] Check pending orders for anomalies
+- [ ] Verify cron job executed successfully
+- [ ] Monitor payment success rate
+- [ ] Review WhatsApp message delivery rate
+- [ ] Check database storage usage
+
+## Weekly Review
+
+- [ ] Review average response times
+- [ ] Analyze booking patterns and peak hours
+- [ ] Review expired order rate (should be < 20%)
+- [ ] Check for WhatsApp API quota warnings
+- [ ] Review and rotate API keys if needed
+
+## Backup & Recovery
+
+### Database Backups
+
+Supabase automatically backs up your database:
+
+- **Free tier**: Daily backups (7-day retention)
+- **Pro tier**: Daily + point-in-time recovery
+
+### Manual Backup
+
+```bash
+# Using Supabase CLI
+supabase db dump -f backup.sql
+
+# Or via pg_dump
+pg_dump "postgresql://postgres:[password]@db.[project].supabase.co:5432/postgres" > backup.sql
+```
+
+### Disaster Recovery
+
+1. Restore database from Supabase backup
+2. Redeploy application from last known good commit
+3. Verify all webhooks are configured
+4. Run end-to-end test booking
+
+## Resources
+
+<CardGroup cols={2}>
+  <Card title="Production Deployment" icon="rocket" href="/deployment/production">
+    Review production deployment steps
+  </Card>
+  <Card title="API Reference" icon="code" href="/technical/webhooks">
+    API endpoint documentation
+  </Card>
+</CardGroup>

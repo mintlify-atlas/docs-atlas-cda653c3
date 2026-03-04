@@ -1,0 +1,419 @@
+---
+title: Environment Variables
+description: Complete reference for all BookLine environment variables
+---
+
+BookLine uses environment variables for configuration. This reference documents all required and optional variables.
+
+## Setup
+
+Create a `.env` file in your project root:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your actual credentials. Never commit this file to version control.
+
+## Complete Environment File
+
+Here's the complete `.env.example` from BookLine:
+
+```bash .env.example
+# =========================
+# BookLine Environment Config
+# =========================
+
+# Server
+PORT=3000
+NODE_ENV=development
+
+# Supabase
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+
+# Meta WhatsApp Cloud API
+WHATSAPP_VERIFY_TOKEN=your-webhook-verify-token
+WHATSAPP_API_VERSION=v21.0
+
+# Razorpay
+RAZORPAY_KEY_ID=your-razorpay-key-id
+RAZORPAY_KEY_SECRET=your-razorpay-key-secret
+RAZORPAY_WEBHOOK_SECRET=your-razorpay-webhook-secret
+
+# Order Expiry (minutes)
+ORDER_EXPIRY_MINUTES=10
+```
+
+## Variable Reference
+
+### Server Configuration
+
+<ParamField path="PORT" type="number" default="3000">
+  Port number for the Express server
+  
+  **Example**: `3000`
+  
+  **Usage**:
+  ```javascript src/config/env.js:4
+  PORT: parseInt(process.env.PORT, 10) || 3000
+  ```
+</ParamField>
+
+<ParamField path="NODE_ENV" type="string" default="development">
+  Application environment mode
+  
+  **Values**: `development` | `production` | `test`
+  
+  **Example**: `production`
+  
+  **Usage**:
+  ```javascript src/config/env.js:5
+  NODE_ENV: process.env.NODE_ENV || 'development'
+  ```
+</ParamField>
+
+### Database (Supabase)
+
+<ParamField path="SUPABASE_URL" type="string" required>
+  Your Supabase project URL
+  
+  **Example**: `https://abcdefghijklmnop.supabase.co`
+  
+  **How to get**:
+  1. Go to [Supabase Dashboard](https://app.supabase.com)
+  2. Select your project
+  3. Settings → API → Project URL
+  
+  **Usage**:
+  ```javascript src/config/env.js:8
+  SUPABASE_URL: process.env.SUPABASE_URL
+  ```
+</ParamField>
+
+<ParamField path="SUPABASE_SERVICE_ROLE_KEY" type="string" required>
+  Supabase service role key for server-side operations
+  
+  **Example**: `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...`
+  
+  **How to get**:
+  1. Supabase Dashboard → Settings → API
+  2. Copy **service_role** key (not anon key)
+  
+  <Warning>
+    This key bypasses Row Level Security. Never expose it to clients.
+  </Warning>
+  
+  **Usage**:
+  ```javascript src/config/env.js:9
+  SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY
+  ```
+</ParamField>
+
+### WhatsApp Cloud API
+
+<ParamField path="WHATSAPP_VERIFY_TOKEN" type="string" required>
+  Webhook verification token for Meta Cloud API
+  
+  **Example**: `my-secure-verify-token-123`
+  
+  **How to set**:
+  1. Generate a random string (e.g., `openssl rand -hex 32`)
+  2. Add to `.env`
+  3. Use same value when configuring webhook in Meta Developer Console
+  
+  **Usage**:
+  ```javascript src/routes/webhook.js:18
+  if (mode === 'subscribe' && token === env.WHATSAPP_VERIFY_TOKEN) {
+  ```
+  
+  See: [WhatsApp Setup Guide](/technical/whatsapp-setup)
+</ParamField>
+
+<ParamField path="WHATSAPP_API_VERSION" type="string" default="v21.0">
+  WhatsApp Cloud API version
+  
+  **Example**: `v21.0`
+  
+  **Supported versions**: Check [Meta's versioning docs](https://developers.facebook.com/docs/graph-api/guides/versioning)
+  
+  **Usage**:
+  ```javascript src/whatsapp/client.js:8
+  const BASE_URL = `https://graph.facebook.com/${env.WHATSAPP_API_VERSION}`;
+  ```
+</ParamField>
+
+<ParamField path="WHATSAPP_ACCESS_TOKEN" type="string">
+  Global WhatsApp access token (optional)
+  
+  **Example**: `EAAxxxxxxxxxxxxxxxxxx...`
+  
+  **Note**: BookLine stores per-clinic access tokens in the database. This global token is used as a fallback.
+  
+  **How to get**: See [WhatsApp Setup - Step 4](/technical/whatsapp-setup#step-4-generate-permanent-access-token)
+  
+  **Usage**:
+  ```javascript src/config/env.js:14
+  WHATSAPP_ACCESS_TOKEN: process.env.WHATSAPP_ACCESS_TOKEN || ''
+  ```
+</ParamField>
+
+### Payment Gateway (Razorpay)
+
+<ParamField path="RAZORPAY_KEY_ID" type="string" required>
+  Razorpay API Key ID
+  
+  **Example**: `rzp_test_xxxxxxxxxx` (test) or `rzp_live_xxxxxxxxxx` (production)
+  
+  **How to get**:
+  1. [Razorpay Dashboard](https://dashboard.razorpay.com) → Settings → API Keys
+  2. Generate Test Key or Live Key
+  3. Copy Key ID
+  
+  **Usage**:
+  ```javascript src/config/razorpay.js:4-5
+  const razorpay = new Razorpay({
+      key_id: env.RAZORPAY_KEY_ID,
+  ```
+  
+  See: [Razorpay Setup Guide](/technical/razorpay-setup)
+</ParamField>
+
+<ParamField path="RAZORPAY_KEY_SECRET" type="string" required>
+  Razorpay API Key Secret
+  
+  **Example**: `xxxxxxxxxxxxxxxxxx`
+  
+  **How to get**: Shown once when generating API key in Razorpay Dashboard
+  
+  <Warning>
+    Store securely. This secret cannot be retrieved again if lost.
+  </Warning>
+  
+  **Usage**:
+  ```javascript src/config/razorpay.js:6
+      key_secret: env.RAZORPAY_KEY_SECRET,
+  ```
+</ParamField>
+
+<ParamField path="RAZORPAY_WEBHOOK_SECRET" type="string" required>
+  Razorpay webhook signature secret
+  
+  **Example**: `whsec_xxxxxxxxxx`
+  
+  **How to get**:
+  1. Razorpay Dashboard → Settings → Webhooks
+  2. Create webhook or view existing webhook
+  3. Copy Secret
+  
+  **Usage**:
+  ```javascript src/routes/payment.js:28-30
+  const expectedSignature = crypto
+      .createHmac('sha256', env.RAZORPAY_WEBHOOK_SECRET)
+      .update(rawBody)
+  ```
+  
+  See: [Webhook Configuration](/technical/webhooks#razorpay-webhook)
+</ParamField>
+
+### Application Settings
+
+<ParamField path="ORDER_EXPIRY_MINUTES" type="number" default="20">
+  Minutes until unpaid orders expire
+  
+  **Example**: `10`
+  
+  **Recommended**: 10-20 minutes for booking systems
+  
+  **Usage**:
+  ```javascript src/config/env.js:22
+  ORDER_EXPIRY_MINUTES: parseInt(process.env.ORDER_EXPIRY_MINUTES, 10) || 20
+  ```
+  
+  <Note>
+    Orders in `pending` status are automatically expired after this duration. Patients must complete payment within this time.
+  </Note>
+</ParamField>
+
+<ParamField path="OWNER_PHONE" type="string">
+  Owner phone number for system notifications (optional)
+  
+  **Example**: `919876543210`
+  
+  **Format**: International format without `+` (e.g., `91` for India)
+  
+  **Usage**:
+  ```javascript src/config/env.js:25
+  OWNER_PHONE: process.env.OWNER_PHONE || ''
+  ```
+</ParamField>
+
+## Validation
+
+BookLine validates required environment variables at startup:
+
+```javascript src/config/env.js:28-43
+const required = [
+  'SUPABASE_URL',
+  'SUPABASE_SERVICE_ROLE_KEY',
+  'WHATSAPP_VERIFY_TOKEN',
+  'RAZORPAY_KEY_ID',
+  'RAZORPAY_KEY_SECRET',
+  'RAZORPAY_WEBHOOK_SECRET',
+];
+
+for (const key of required) {
+  if (!env[key]) {
+    console.error(`❌ Missing required env var: ${key}`);
+    process.exit(1);
+  }
+}
+```
+
+If any required variable is missing, the application exits with an error.
+
+## Environment-Specific Configuration
+
+### Development
+
+```bash .env.development
+NODE_ENV=development
+PORT=3000
+
+# Use test credentials
+RAZORPAY_KEY_ID=rzp_test_xxxxxxxxxx
+RAZORPAY_KEY_SECRET=test_secret
+
+# Use ngrok for webhooks
+# Update Meta/Razorpay with: https://abc123.ngrok.io
+```
+
+### Production
+
+```bash .env.production
+NODE_ENV=production
+PORT=3000
+
+# Use live credentials
+RAZORPAY_KEY_ID=rzp_live_xxxxxxxxxx
+RAZORPAY_KEY_SECRET=live_secret
+
+# Use production domain for webhooks
+# https://api.yourdomain.com
+```
+
+## Security Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Never commit .env" icon="ban">
+    Add `.env` to `.gitignore` to prevent credential leaks
+  </Card>
+  
+  <Card title="Use .env.example" icon="file">
+    Commit `.env.example` with placeholder values for documentation
+  </Card>
+  
+  <Card title="Rotate secrets regularly" icon="rotate">
+    Update API keys and webhook secrets periodically
+  </Card>
+  
+  <Card title="Use different credentials per environment" icon="layer-group">
+    Separate test and production credentials
+  </Card>
+</CardGroup>
+
+### Loading Environment Variables
+
+BookLine uses `dotenv` to load variables:
+
+```javascript src/config/env.js:1
+require('dotenv').config();
+```
+
+This reads `.env` at application startup.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="App crashes: Missing required env var">
+    **Cause**: Required variable not set in `.env`
+    
+    **Solution**:
+    1. Check error message for variable name
+    2. Add to `.env` file
+    3. Restart application
+  </Accordion>
+
+  <Accordion title="Database connection fails">
+    **Cause**: Invalid `SUPABASE_URL` or `SUPABASE_SERVICE_ROLE_KEY`
+    
+    **Solution**:
+    1. Verify credentials in Supabase Dashboard
+    2. Ensure no extra whitespace in `.env`
+    3. Check project is not paused in Supabase
+  </Accordion>
+
+  <Accordion title="WhatsApp webhook verification fails">
+    **Cause**: `WHATSAPP_VERIFY_TOKEN` mismatch
+    
+    **Solution**:
+    1. Ensure `.env` token matches Meta Developer Console
+    2. No extra spaces or quotes
+    3. Restart server after changing `.env`
+  </Accordion>
+
+  <Accordion title="Razorpay authentication error">
+    **Cause**: Wrong API credentials or test/live mismatch
+    
+    **Solution**:
+    1. Verify using correct environment (test vs live)
+    2. Check credentials haven't been rotated
+    3. Ensure Key ID and Secret are from same key pair
+  </Accordion>
+
+  <Accordion title="Environment variables not loading">
+    **Cause**: `.env` file not in project root or syntax error
+    
+    **Solution**:
+    1. Ensure `.env` is in same directory as `package.json`
+    2. Check for syntax errors (no quotes needed)
+    3. Restart application after changes
+  </Accordion>
+</AccordionGroup>
+
+## Checking Current Configuration
+
+To verify environment variables are loaded correctly:
+
+```javascript
+const env = require('./config/env');
+console.log('Environment:', env.NODE_ENV);
+console.log('Port:', env.PORT);
+console.log('Supabase URL:', env.SUPABASE_URL);
+console.log('WhatsApp API Version:', env.WHATSAPP_API_VERSION);
+// Do NOT log secrets in production
+```
+
+<Warning>
+  Never log secrets (`RAZORPAY_KEY_SECRET`, `SUPABASE_SERVICE_ROLE_KEY`, etc.) in production logs.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="WhatsApp Setup" icon="message" href="/technical/whatsapp-setup">
+    Configure WhatsApp Cloud API credentials
+  </Card>
+  
+  <Card title="Razorpay Setup" icon="credit-card" href="/technical/razorpay-setup">
+    Set up Razorpay payment gateway
+  </Card>
+  
+  <Card title="Webhook Configuration" icon="webhook" href="/technical/webhooks">
+    Configure and test webhooks
+  </Card>
+  
+  <Card title="Deployment" icon="rocket" href="/deployment/production">
+    Deploy to production
+  </Card>
+</CardGroup>

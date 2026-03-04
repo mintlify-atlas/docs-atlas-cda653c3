@@ -1,0 +1,434 @@
+---
+title: Webhook Configuration
+description: Configure and test WhatsApp and Razorpay webhooks for BookLine
+---
+
+BookLine uses webhooks to receive real-time notifications from WhatsApp Cloud API and Razorpay. This guide covers webhook setup, verification, and testing.
+
+## Overview
+
+BookLine implements two webhook endpoints:
+
+- **WhatsApp Webhook**: `/webhook` - Receives incoming messages and status updates
+- **Razorpay Webhook**: `/payment/webhook` - Receives payment confirmation events
+
+## WhatsApp Webhook
+
+### Endpoint Configuration
+
+<Steps>
+  <Step title="Set up webhook URL">
+    Configure your webhook URL in Meta Developer Console:
+    
+    ```bash
+    https://yourdomain.com/webhook
+    ```
+    
+    The endpoint must be publicly accessible via HTTPS.
+  </Step>
+
+  <Step title="Configure verify token">
+    Set the `WHATSAPP_VERIFY_TOKEN` in your environment:
+    
+    ```bash
+    WHATSAPP_VERIFY_TOKEN=your-secure-random-token
+    ```
+    
+    This token is used to verify webhook requests from Meta.
+  </Step>
+
+  <Step title="Subscribe to webhook events">
+    In Meta Developer Console, subscribe to:
+    - `messages` - Incoming text and interactive messages
+  </Step>
+</Steps>
+
+### Verification Logic
+
+When Meta verifies your webhook, it sends a GET request with query parameters:
+
+```javascript src/routes/webhook.js:13-25
+router.get('/', (req, res) => {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+
+    if (mode === 'subscribe' && token === env.WHATSAPP_VERIFY_TOKEN) {
+        console.log('[Webhook] ✅ Verification successful');
+        return res.status(200).send(challenge);
+    }
+
+    console.warn('[Webhook] ❌ Verification failed');
+    return res.sendStatus(403);
+});
+```
+
+<ParamField query="hub.mode" type="string" required>
+  Must be `subscribe` for webhook verification
+</ParamField>
+
+<ParamField query="hub.verify_token" type="string" required>
+  Must match your `WHATSAPP_VERIFY_TOKEN` environment variable
+</ParamField>
+
+<ParamField query="hub.challenge" type="string" required>
+  Random string that must be echoed back to complete verification
+</ParamField>
+
+### Incoming Message Payload
+
+WhatsApp sends POST requests with message data:
+
+```json
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "metadata": {
+              "phone_number_id": "123456789"
+            },
+            "messages": [
+              {
+                "from": "919876543210",
+                "id": "wamid.xxx",
+                "type": "text",
+                "text": {
+                  "body": "Hello"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Message Processing
+
+BookLine processes both text and interactive messages:
+
+```javascript src/routes/webhook.js:67-90
+for (const msg of messages) {
+    const from = msg.from; // sender phone number
+    const messageId = msg.id;
+    const messageType = msg.type;
+
+    let messageBody = '';
+    let interactiveData = null;
+
+    if (messageType === 'text') {
+        messageBody = msg.text?.body || '';
+    } else if (messageType === 'interactive') {
+        interactiveData = msg.interactive;
+    } else {
+        // Ignore other message types (images, audio, etc.)
+        continue;
+    }
+
+    // Route to handler (fire and forget — we already sent 200)
+    messageRouter
+        .route(phoneNumberId, from, messageId, messageBody, messageType, interactiveData)
+        .catch(err => {
+            console.error('[Webhook] Message handler error:', err);
+        });
+}
+```
+
+<Note>
+  BookLine responds with `200 OK` immediately to prevent Meta retries, then processes messages asynchronously.
+</Note>
+
+## Razorpay Webhook
+
+### Endpoint Configuration
+
+<Steps>
+  <Step title="Configure webhook URL in Razorpay Dashboard">
+    Go to Settings → Webhooks and add:
+    
+    ```bash
+    https://yourdomain.com/payment/webhook
+    ```
+  </Step>
+
+  <Step title="Set webhook secret">
+    Copy the webhook secret from Razorpay and add to your environment:
+    
+    ```bash
+    RAZORPAY_WEBHOOK_SECRET=your-webhook-secret
+    ```
+  </Step>
+
+  <Step title="Subscribe to events">
+    Enable the following events:
+    - `payment.captured` - Standard payment success
+    - `order.paid` - Order payment confirmation
+    - `payment_link.paid` - Payment link completion
+    - `qr_code.credited` - UPI QR code payment
+  </Step>
+</Steps>
+
+### Signature Verification
+
+Razorpay signs webhook requests using HMAC SHA256:
+
+```javascript src/routes/payment.js:23-37
+const signature = req.headers['x-razorpay-signature'];
+const rawBody = Buffer.isBuffer(req.body) 
+    ? req.body.toString('utf8') 
+    : (typeof req.body === 'string' ? req.body : JSON.stringify(req.body));
+
+const expectedSignature = crypto
+    .createHmac('sha256', env.RAZORPAY_WEBHOOK_SECRET)
+    .update(rawBody)
+    .digest('hex');
+
+if (signature !== expectedSignature) {
+    console.warn('[Payment] ❌ Invalid webhook signature');
+    return res.status(400).json({ error: 'Invalid signature' });
+}
+```
+
+<Warning>
+  Always verify webhook signatures to prevent fraudulent payment confirmations.
+</Warning>
+
+### Payment Event Handling
+
+BookLine handles multiple payment event types:
+
+```javascript src/routes/payment.js:43-68
+const eventType = event.event;
+
+// We only care about successful payments
+if (eventType !== 'payment.captured' && eventType !== 'order.paid'
+    && eventType !== 'payment_link.paid' && eventType !== 'qr_code.credited') {
+    return res.status(200).json({ status: 'ignored' });
+}
+
+// Extract order info
+let gatewayOrderId;
+let paymentId;
+let orderId; // our internal order ID (from QR notes)
+
+if (eventType === 'payment_link.paid') {
+    gatewayOrderId = event.payload?.payment_link?.entity?.id;
+    paymentId = event.payload?.payment?.entity?.id;
+} else if (eventType === 'qr_code.credited') {
+    // QR payments: find our order via notes
+    paymentId = event.payload?.payment?.entity?.id;
+    orderId = event.payload?.qr_code?.entity?.notes?.order_id;
+} else if (eventType === 'payment.captured') {
+    gatewayOrderId = event.payload?.payment?.entity?.notes?.payment_link_id
+        || event.payload?.payment?.entity?.order_id;
+    paymentId = event.payload?.payment?.entity?.id;
+}
+```
+
+### Idempotency Protection
+
+BookLine prevents duplicate processing using optimistic concurrency:
+
+```javascript src/routes/payment.js:89-101
+// Idempotency check — only process if status is 'pending'
+if (order.status !== 'pending') {
+    console.log(`[Payment] Order already processed (status: ${order.status})`);
+    return res.status(200).json({ status: 'already_processed' });
+}
+
+// Mark order as paid (with optimistic concurrency)
+const updatedOrder = await orderService.updateStatus(order.id, 'pending', 'paid');
+if (!updatedOrder) {
+    // Another webhook already processed this
+    console.log(`[Payment] Concurrent processing — skipping`);
+    return res.status(200).json({ status: 'concurrent_skip' });
+}
+```
+
+<Note>
+  Razorpay may send duplicate webhooks. BookLine uses database-level concurrency control to ensure each payment is processed only once.
+</Note>
+
+## Testing Webhooks
+
+### Local Development with ngrok
+
+<Steps>
+  <Step title="Install ngrok">
+    ```bash
+    npm install -g ngrok
+    ```
+  </Step>
+
+  <Step title="Start your local server">
+    ```bash
+    npm run dev
+    ```
+  </Step>
+
+  <Step title="Create public tunnel">
+    ```bash
+    ngrok http 3000
+    ```
+    
+    Copy the HTTPS URL (e.g., `https://abc123.ngrok.io`)
+  </Step>
+
+  <Step title="Update webhook URLs">
+    - WhatsApp: `https://abc123.ngrok.io/webhook`
+    - Razorpay: `https://abc123.ngrok.io/payment/webhook`
+  </Step>
+</Steps>
+
+### Testing WhatsApp Webhook
+
+<CodeGroup>
+```bash cURL
+curl -X GET "https://yourdomain.com/webhook?hub.mode=subscribe&hub.verify_token=your-token&hub.challenge=test123"
+```
+
+```bash Expected Response
+test123
+```
+</CodeGroup>
+
+### Testing Razorpay Webhook
+
+Use Razorpay's webhook testing feature in the dashboard:
+
+1. Go to Settings → Webhooks
+2. Click on your webhook
+3. Use "Send Test Webhook" with event type `payment.captured`
+
+### Manual Payload Testing
+
+<CodeGroup>
+```bash WhatsApp Test
+curl -X POST https://yourdomain.com/webhook \
+  -H "Content-Type: application/json" \
+  -d '{
+    "object": "whatsapp_business_account",
+    "entry": [{
+      "changes": [{
+        "field": "messages",
+        "value": {
+          "metadata": {"phone_number_id": "123456789"},
+          "messages": [{
+            "from": "919876543210",
+            "id": "test123",
+            "type": "text",
+            "text": {"body": "hi"}
+          }]
+        }
+      }]
+    }]
+  }'
+```
+
+```bash Razorpay Test
+# Note: Signature verification will fail with manual payloads
+# Use Razorpay dashboard for accurate testing
+curl -X POST https://yourdomain.com/payment/webhook \
+  -H "Content-Type: application/json" \
+  -H "x-razorpay-signature: generated-signature" \
+  -d '{"event": "payment.captured", "payload": {...}}'
+```
+</CodeGroup>
+
+## Monitoring Webhooks
+
+### Check Webhook Logs
+
+```bash
+# View real-time logs
+tail -f logs/app.log | grep Webhook
+
+# Filter payment webhooks
+tail -f logs/app.log | grep Payment
+```
+
+### Common Issues
+
+<AccordionGroup>
+  <Accordion title="WhatsApp verification fails">
+    **Symptoms**: Meta shows "Verification failed" error
+    
+    **Solutions**:
+    - Ensure `WHATSAPP_VERIFY_TOKEN` matches exactly
+    - Check webhook URL is publicly accessible via HTTPS
+    - Verify no authentication middleware blocks GET requests
+  </Accordion>
+
+  <Accordion title="Razorpay signature mismatch">
+    **Symptoms**: `Invalid webhook signature` error in logs
+    
+    **Solutions**:
+    - Verify `RAZORPAY_WEBHOOK_SECRET` is correct
+    - Ensure raw body parser is used: `express.raw({type: 'application/json'})`
+    - Check webhook secret hasn't been rotated in Razorpay dashboard
+  </Accordion>
+
+  <Accordion title="Messages not processing">
+    **Symptoms**: Webhooks received but no response sent
+    
+    **Solutions**:
+    - Check `phone_number_id` matches clinic configuration
+    - Verify WhatsApp access token is valid
+    - Check messageRouter logs for handler errors
+  </Accordion>
+
+  <Accordion title="Duplicate payment processing">
+    **Symptoms**: Same payment processed multiple times
+    
+    **Solutions**:
+    - Verify order status checks are working
+    - Check database constraints on order status updates
+    - Review optimistic concurrency implementation
+  </Accordion>
+</AccordionGroup>
+
+## Security Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Always verify signatures" icon="shield-check">
+    Never trust webhook payloads without signature verification
+  </Card>
+  
+  <Card title="Use HTTPS only" icon="lock">
+    All webhook endpoints must use SSL/TLS encryption
+  </Card>
+  
+  <Card title="Implement idempotency" icon="rotate">
+    Handle duplicate webhooks gracefully with status checks
+  </Card>
+  
+  <Card title="Respond quickly" icon="bolt">
+    Return 200 OK immediately, process asynchronously
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="WhatsApp Setup" icon="message" href="/technical/whatsapp-setup">
+    Configure WhatsApp Cloud API integration
+  </Card>
+  
+  <Card title="Razorpay Setup" icon="credit-card" href="/technical/razorpay-setup">
+    Set up Razorpay payment gateway
+  </Card>
+  
+  <Card title="Environment Variables" icon="key" href="/technical/environment-variables">
+    Complete environment configuration reference
+  </Card>
+  
+  <Card title="Deployment" icon="rocket" href="/deployment/production">
+    Deploy to production
+  </Card>
+</CardGroup>

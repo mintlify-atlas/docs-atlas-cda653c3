@@ -1,0 +1,446 @@
+---
+title: 'Database Functions'
+description: 'Supabase RPC functions for atomic operations'
+---
+
+BookLine uses PostgreSQL stored procedures (via Supabase RPC) for atomic operations that require database-level consistency.
+
+## Overview
+
+All RPC functions are defined in `supabase/migration.sql` and are called via the Supabase JavaScript client:
+
+```javascript
+const { data, error } = await supabase.rpc('function_name', { param: value });
+```
+
+---
+
+## increment_daily_count
+
+Atomically increment the `current_count` for a doctor's daily state and return the new count. Used for position assignment during booking creation.
+
+### Parameters
+
+<ParamField path="p_doctor_id" type="UUID" required>
+  The doctor's unique identifier
+</ParamField>
+
+<ParamField path="p_date" type="DATE" required>
+  The booking date in `YYYY-MM-DD` format
+</ParamField>
+
+### Returns
+
+<ResponseField name="new_count" type="INTEGER">
+  The updated count after increment
+</ResponseField>
+
+<ResponseField name="state_status" type="TEXT">
+  The current daily status: `OPEN`, `PAUSED`, or `CLOSED`
+</ResponseField>
+
+### SQL Definition
+
+<CodeGroup>
+```sql Function Definition
+CREATE OR REPLACE FUNCTION increment_daily_count(
+  p_doctor_id UUID,
+  p_date DATE
+)
+RETURNS TABLE(new_count INTEGER, state_status TEXT)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_record doctor_daily_states%ROWTYPE;
+BEGIN
+  UPDATE doctor_daily_states
+  SET current_count = current_count + 1
+  WHERE doctor_id = p_doctor_id AND date = p_date
+  RETURNING * INTO v_record;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Daily state not found for doctor % on date %', p_doctor_id, p_date;
+  END IF;
+
+  new_count := v_record.current_count;
+  state_status := v_record.status;
+  RETURN NEXT;
+END;
+$$;
+```
+
+```javascript JavaScript Usage
+const doctorService = require('./services/doctorService');
+
+// Atomically increment and get new position
+const result = await doctorService.incrementCount(doctorId, '2026-03-04');
+
+if (result) {
+  console.log(`New position: ${result.new_count}`);
+  console.log(`Status: ${result.state_status}`);
+} else {
+  console.error('Failed to increment count');
+}
+```
+
+```javascript Raw Supabase Call
+const { data, error } = await supabase
+  .rpc('increment_daily_count', {
+    p_doctor_id: 'uuid-here',
+    p_date: '2026-03-04'
+  });
+
+if (error) {
+  console.error('RPC error:', error.message);
+} else {
+  const { new_count, state_status } = data[0];
+  console.log(`Position ${new_count}, Status: ${state_status}`);
+}
+```
+</CodeGroup>
+
+### Use Case
+
+This function is critical for **race-condition-free position assignment**:
+
+1. Patient confirms booking
+2. Payment link created
+3. Payment webhook received
+4. `increment_daily_count()` called → atomic increment
+5. Check if `new_count` exceeds `max_patients`
+6. If yes → rollback via `decrement_daily_count()` and refund
+7. If no → create booking with `position = new_count`
+
+<Warning>
+Always call `getOrCreateDailyState()` BEFORE calling this function to ensure the daily state row exists. This function will raise an exception if the row doesn't exist.
+</Warning>
+
+---
+
+## decrement_daily_count
+
+Atomically decrement the `current_count` for a doctor's daily state. **Only used for overflow rollback** when capacity is exceeded.
+
+### Parameters
+
+<ParamField path="p_doctor_id" type="UUID" required>
+  The doctor's unique identifier
+</ParamField>
+
+<ParamField path="p_date" type="DATE" required>
+  The booking date
+</ParamField>
+
+### Returns
+
+<ResponseField name="return" type="VOID">
+  This function does not return a value
+</ResponseField>
+
+### SQL Definition
+
+<CodeGroup>
+```sql Function Definition
+CREATE OR REPLACE FUNCTION decrement_daily_count(
+  p_doctor_id UUID,
+  p_date DATE
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  UPDATE doctor_daily_states
+  SET current_count = GREATEST(current_count - 1, 0)
+  WHERE doctor_id = p_doctor_id AND date = p_date;
+END;
+$$;
+```
+
+```javascript JavaScript Usage
+const doctorService = require('./services/doctorService');
+
+// Rollback on overflow
+await doctorService.decrementCount(doctorId, '2026-03-04');
+```
+
+```javascript Raw Supabase Call
+const { error } = await supabase
+  .rpc('decrement_daily_count', {
+    p_doctor_id: 'uuid-here',
+    p_date: '2026-03-04'
+  });
+
+if (error) {
+  console.error('Decrement failed:', error.message);
+}
+```
+</CodeGroup>
+
+### Use Case
+
+Called during overflow rollback in `bookingService.processPayment()`:
+
+```javascript Example Rollback Flow
+const newCount = result.new_count;
+
+if (newCount > config.max_patients) {
+  // Overflow! Rollback the increment
+  await doctorService.decrementCount(doctorId, dateStr);
+  return { success: false, reason: 'CAP_EXCEEDED', refundRequired: true };
+}
+```
+
+<Info>
+The `GREATEST(current_count - 1, 0)` ensures the count never goes below zero, even if called multiple times by mistake.
+</Info>
+
+---
+
+## expire_stale_orders
+
+Bulk-expire all pending orders that have passed their `expires_at` timestamp. Returns the number of orders affected.
+
+### Parameters
+
+<ParamField path="none" type="void">
+  This function takes no parameters
+</ParamField>
+
+### Returns
+
+<ResponseField name="return" type="INTEGER">
+  Number of orders that were expired
+</ResponseField>
+
+### SQL Definition
+
+<CodeGroup>
+```sql Function Definition
+CREATE OR REPLACE FUNCTION expire_stale_orders()
+RETURNS INTEGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  affected INTEGER;
+BEGIN
+  UPDATE orders
+  SET status = 'expired'
+  WHERE status = 'pending' AND expires_at < NOW();
+
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  RETURN affected;
+END;
+$$;
+```
+
+```javascript JavaScript Usage
+const orderService = require('./services/orderService');
+
+// Run as a cron job every 5 minutes
+const count = await orderService.expireStaleOrders();
+if (count > 0) {
+  console.log(`Expired ${count} stale orders`);
+}
+```
+
+```javascript Raw Supabase Call
+const { data, error } = await supabase.rpc('expire_stale_orders');
+
+if (error) {
+  console.error('Error expiring orders:', error.message);
+} else {
+  console.log(`Expired ${data} orders`);
+}
+```
+
+```javascript Cron Job Example
+const cron = require('node-cron');
+const orderService = require('./services/orderService');
+
+// Run every 5 minutes
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    const count = await orderService.expireStaleOrders();
+    if (count > 0) {
+      console.log(`[Cron] Expired ${count} stale orders`);
+      // Optionally: notify patients or trigger refunds
+    }
+  } catch (err) {
+    console.error('[Cron] Error expiring orders:', err.message);
+  }
+});
+```
+</CodeGroup>
+
+### Use Case
+
+BookLine payment links expire after 10 minutes (configurable via `ORDER_EXPIRY_MINUTES` env var). This function is called by a cron job to:
+
+1. Identify all orders with `status = 'pending'` AND `expires_at < NOW()`
+2. Update their status to `'expired'`
+3. Return the count for logging
+
+**Why use RPC instead of a direct update?**
+- Encapsulates the logic in the database layer
+- Ensures consistent behavior across multiple app instances
+- Can be extended with additional logic (e.g., logging, triggers)
+- Atomic operation with a single database round-trip
+
+<Note>
+Expired orders do NOT release capacity because they were never confirmed. Only `paid` orders increment the daily count.
+</Note>
+
+---
+
+## Database Schema Context
+
+These RPC functions operate on the following core tables:
+
+### doctor_daily_states
+
+```sql
+CREATE TABLE doctor_daily_states (
+  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  doctor_id     UUID NOT NULL REFERENCES doctors(id) ON DELETE CASCADE,
+  date          DATE NOT NULL,
+  current_count INTEGER NOT NULL DEFAULT 0,
+  status        TEXT NOT NULL DEFAULT 'OPEN'
+                  CHECK (status IN ('OPEN', 'PAUSED', 'CLOSED')),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX idx_daily_state_doctor_date
+  ON doctor_daily_states (doctor_id, date);
+```
+
+**Purpose:** One row per doctor per day. Tracks real-time booking count and status.
+
+### orders
+
+```sql
+CREATE TABLE orders (
+  id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  clinic_id        UUID NOT NULL REFERENCES clinics(id),
+  doctor_id        UUID NOT NULL REFERENCES doctors(id),
+  patient_phone    TEXT NOT NULL,
+  amount           INTEGER NOT NULL,
+  date             DATE NOT NULL,
+  gateway_order_id TEXT NOT NULL UNIQUE,
+  status           TEXT NOT NULL DEFAULT 'pending'
+                     CHECK (status IN ('pending', 'paid', 'expired', 'refunded')),
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at       TIMESTAMPTZ NOT NULL
+);
+```
+
+**Purpose:** Tracks payment lifecycle. Links to Razorpay via `gateway_order_id`.
+
+---
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Always check for errors">
+    RPC calls can fail due to database constraints or exceptions. Always check the `error` object:
+    
+    ```javascript
+    const { data, error } = await supabase.rpc('increment_daily_count', params);
+    
+    if (error) {
+      console.error('RPC error:', error.message);
+      // Handle gracefully
+      return null;
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Ensure daily state exists before incrementing">
+    Call `doctorService.getOrCreateDailyState()` before calling `increment_daily_count()` to avoid exceptions:
+    
+    ```javascript
+    // Create state if it doesn't exist
+    await doctorService.getOrCreateDailyState(doctorId, dateStr);
+    
+    // Now safe to increment
+    const result = await doctorService.incrementCount(doctorId, dateStr);
+    ```
+  </Accordion>
+  
+  <Accordion title="Use service wrappers instead of raw RPC">
+    Prefer calling service methods like `doctorService.incrementCount()` instead of raw `supabase.rpc()` calls. Services handle error logging and data transformation.
+  </Accordion>
+  
+  <Accordion title="Monitor RPC performance">
+    These functions are called on every booking. Monitor query performance in Supabase dashboard under Database → Query Performance.
+    
+    Expected execution time:
+    - `increment_daily_count`: < 5ms
+    - `decrement_daily_count`: < 5ms
+    - `expire_stale_orders`: < 50ms (depends on number of stale orders)
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Error Handling
+
+### increment_daily_count Errors
+
+<CodeGroup>
+```javascript Exception: Daily state not found
+// This exception is raised if the daily state row doesn't exist
+// Solution: Always call getOrCreateDailyState() first
+
+try {
+  const result = await supabase.rpc('increment_daily_count', {
+    p_doctor_id: doctorId,
+    p_date: '2026-03-04'
+  });
+} catch (err) {
+  if (err.message.includes('Daily state not found')) {
+    // Create the daily state and retry
+    await doctorService.getOrCreateDailyState(doctorId, '2026-03-04');
+    // Retry increment
+  }
+}
+```
+</CodeGroup>
+
+### General Error Handling Pattern
+
+```javascript
+const { data, error } = await supabase.rpc('function_name', params);
+
+if (error) {
+  console.error(`[RPC] ${error.message}`, {
+    code: error.code,
+    details: error.details,
+    hint: error.hint
+  });
+  
+  // Log to monitoring service
+  // Return graceful error to user
+  return null;
+}
+
+return data;
+```
+
+---
+
+## Related Documentation
+
+<CardGroup cols={2}>
+  <Card title="Core Services" icon="server" href="/api/services">
+    Service layer that calls these RPC functions
+  </Card>
+  <Card title="Database Schema" icon="database" href="/architecture/database-schema">
+    Full schema documentation
+  </Card>
+  <Card title="Booking Flow" icon="calendar-check" href="/guides/patient-flow">
+    How these functions fit into the booking process
+  </Card>
+  <Card title="Supabase Docs" icon="book" href="https://supabase.com/docs/guides/database/functions" target="_blank">
+    Official Supabase RPC documentation
+  </Card>
+</CardGroup>
