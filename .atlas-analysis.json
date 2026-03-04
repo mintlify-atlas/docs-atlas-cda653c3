@@ -1,0 +1,92 @@
+{
+  "projectType": "saas",
+  "projectName": "BookLine",
+  "projectDescription": "WhatsApp-based prepaid daily booking system for clinics with integrated payment processing",
+  "theme": "mint",
+  "primaryColor": "#25D366",
+  "lightColor": "#E7F8EF",
+  "darkColor": "#128C7E",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "setup"
+            ]
+          },
+          {
+            "group": "User Guides",
+            "pages": [
+              "guides/patient-flow",
+              "guides/admin-flow",
+              "guides/configuration"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/safety-guarantees",
+              "architecture/database-schema"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Technical",
+        "groups": [
+          {
+            "group": "Integration",
+            "pages": [
+              "technical/webhooks",
+              "technical/whatsapp-setup",
+              "technical/razorpay-setup",
+              "technical/environment-variables"
+            ]
+          },
+          {
+            "group": "API Reference",
+            "pages": [
+              "api/services",
+              "api/handlers",
+              "api/database-functions"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/production",
+              "deployment/monitoring"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "WhatsApp-native booking interface via Meta Cloud API",
+    "Prepaid booking system with Razorpay integration",
+    "Atomic position assignment with concurrency safety",
+    "Admin management via WhatsApp commands",
+    "Automatic order expiry with cron jobs",
+    "Daily booking caps and time windows per doctor",
+    "Multi-clinic support with isolated data",
+    "Overflow detection with automatic refunds"
+  ],
+  "publicApiSurface": [
+    "POST /webhook - WhatsApp message webhook",
+    "POST /payment/webhook - Razorpay payment webhook",
+    "GET /health - Health check endpoint",
+    "bookingService.createBooking()",
+    "orderService.createOrder()",
+    "doctorService.getDoctorsByClinic()",
+    "adminService.validatePin()",
+    "increment_daily_count() - RPC function",
+    "expire_stale_orders() - RPC function"
+  ]
+}
